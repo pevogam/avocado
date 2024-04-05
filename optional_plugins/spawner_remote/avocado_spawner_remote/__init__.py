@@ -173,6 +173,9 @@ class RemoteSpawner(Spawner, SpawnerMixin):
                 )
                 return False
 
+        status, output = session.cmd_status_output("pkill -f task-run")
+        if status == 0:
+            LOG.warning(output)
         cmd = shlex.join(entry_point_args) + " > /dev/null"
         timeout = self.config.get("spawner.remote.test_timeout")
         status, output = await RemoteSpawner.run_remote_cmd_async(session, cmd, timeout)

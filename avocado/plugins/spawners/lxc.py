@@ -254,6 +254,11 @@ class LXCSpawner(Spawner, SpawnerMixin):
         LOG.info(f"Container state: {container.state}")
         LOG.info(f"Container ID: {container_id} PID: {container.init_pid}")
 
+        exitcode, output, err = LXCSpawner.run_container_cmd(
+            container, ["pkill", "-f", "task-run"]
+        )
+        if exitcode == 0:
+            LOG.warning(output)
         exitcode, output, err = await LXCSpawner.run_container_cmd_async(
             container, entry_point_args
         )
