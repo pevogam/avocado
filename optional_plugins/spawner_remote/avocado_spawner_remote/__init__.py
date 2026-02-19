@@ -158,6 +158,12 @@ class RemoteSpawner(Spawner, SpawnerMixin):
             if status == 0:
                 break
             time.sleep(1)
+        # diagnose potential errors and if something bad happened to the task
+        _, output = RemoteSpawner.run_remote_cmd(
+            session, f"cat error.log", 10
+        )
+        if output.strip():
+            LOG.error(output)
         return status == 0
 
     @with_slot_reservation
@@ -194,7 +200,7 @@ class RemoteSpawner(Spawner, SpawnerMixin):
                 )
                 return False
 
-        cmd = shlex.join(entry_point_args) + " > /dev/null &"
+        cmd = shlex.join(entry_point_args) + " >/dev/null 2>error.log &"
         timeout = self.config.get("spawner.remote.test_timeout")
         status, output = RemoteSpawner.run_remote_cmd(session, cmd, timeout)
         LOG.debug(f"Command exited with code {status}")
