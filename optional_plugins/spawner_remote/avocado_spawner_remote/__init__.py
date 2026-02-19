@@ -218,7 +218,7 @@ class RemoteSpawner(Spawner, SpawnerMixin):
         while True:
             if not RemoteSpawner.is_task_alive(runtime_task):
                 return
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(30)
 
     async def terminate_task(self, runtime_task):
         session = runtime_task.spawner_handle
