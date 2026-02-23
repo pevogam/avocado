@@ -9,7 +9,7 @@ from avocado.core.task.runtime import RuntimeTaskStatus
 from avocado.core.teststatus import STATUSES_NOT_OK
 from avocado.core.utils import messages
 
-LOG = logging.getLogger(__name__)
+LOG = logging.getLogger("avocado.job." + __name__)
 
 
 class TaskStateMachine:
