@@ -157,6 +157,9 @@ class RemoteSpawner(Spawner, SpawnerMixin):
             LOG.debug(output)
             if status == 0:
                 break
+            else:
+                if status != 1:
+                    LOG.critical(f"Task {runtime_task.task.identifier} errored with status {status} and output: {output}")
             time.sleep(1)
         # diagnose potential errors and if something bad happened to the task
         _, output = RemoteSpawner.run_remote_cmd(

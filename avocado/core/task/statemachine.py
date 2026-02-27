@@ -2,6 +2,8 @@ import asyncio
 import collections
 import logging
 import multiprocessing
+import os
+import pathlib
 import time
 
 from avocado.core.exceptions import JobFailFast
@@ -204,6 +206,7 @@ class Worker:
         for terminated_task in terminate_tasks:
             task_id = str(terminated_task.task.identifier)
             job_id = terminated_task.task.job_id
+            LOG.critical(f"Test {task_id} interrupted: {reason}")
             log_message = messages.LogMessage.get(
                 f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())} | Test interrupted: {reason}",
                 id=task_id,
@@ -435,14 +438,48 @@ class Worker:
             or {}
         )
         # or maybe its results are not available yet
+        i = 0
         while latest_task_data.get("result") is None:
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(1)
             latest_task_data = (
                 self._state_machine._status_repo.get_latest_task_data(
                     str(runtime_task.task.identifier)
                 )
                 or {}
             )
+            # TODO: provide an even shorter test timeout to ERROR this instead of waiting
+            # indefinitely or via job timeout - finished status must be received much faster
+            # than a typical test duration
+            # TODO: in this logging helpful we never see the finished status message and we only
+            # see "run" status messages despite the log file inclusive and after all final log messages,
+            # test process is always long finished by then
+            i += 1
+            if i > 1800:
+                if i == 1801:
+                    pathlib.Path("/tmp/test.lock").touch()
+                # TODO: this at least needs some timeout
+                LOG.critical(f"Missing finished status for potentially ended task {runtime_task.task.identifier}")
+                data = self._state_machine._status_repo.get_all_task_data(
+                    str(runtime_task.task.identifier)
+                )
+                LOG.critical(type(data))
+                LOG.critical("\n".join([str(d) for d in data[-100:]]))
+                await self._send_finished_tasks_message(
+                    [runtime_task], "Timeout reached"
+                )
+                """
+                LOG.critical(f"Locking to debug")
+                lock_path = os.path.abspath("/tmp/test.lock")
+                while os.path.exists(lock_path):
+                    LOG.warning(
+                        f"Test run locked using {lock_path}, please remove it "
+                        "to continue the test run"
+                    )
+                    await asyncio.sleep(1)
+                """
+                #raise RuntimeError(
+                #    f"Task {runtime_task.task.identifier} has no result after completion"
+                #)
         if runtime_task.task.category != "test":
             async with self._state_machine.cache_lock:
                 await self._spawner.update_requirement_cache(
