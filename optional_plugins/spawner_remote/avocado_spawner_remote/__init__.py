@@ -179,7 +179,7 @@ class RemoteSpawner(Spawner, SpawnerMixin):
             msg = f"Could not determine Python module name for runnable with kind {runtime_task.task.runnable.kind}"
             raise RemoteSpawnerException(msg)
         # using the "python" symlink will result in the container default python version
-        entry_point_args = ["python3", "-m", full_module_name, "task-run"]
+        entry_point_args = ["/mnt/local/shared/vt_wrapper.sh", "python3", "-m", full_module_name, "task-run"]
         entry_point_args.extend(task.get_command_args())
 
         session = runtime_task.spawner_handle
