@@ -258,6 +258,12 @@ class LXCSpawner(Spawner, SpawnerMixin):
         LOG.info(f"Container state: {container.state}")
         LOG.info(f"Container ID: {container_id} PID: {container.init_pid}")
 
+        exitcode, _, _ = LXCSpawner.run_container_cmd(container, ["prep", "-f", "task-run"])
+        if exitcode == 0:
+            raise RuntimeError(
+                "A previous task is still alive but only one task "
+                "can run in an LXC container at a time"
+            )
         exitcode, output, err = await LXCSpawner.run_container_cmd_async(
             container, entry_point_args
         )
