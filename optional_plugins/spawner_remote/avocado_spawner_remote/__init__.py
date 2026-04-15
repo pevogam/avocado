@@ -121,10 +121,13 @@ class RemoteSpawner(Spawner, SpawnerMixin):
                 session = remote.remote_login(**session_data)
                 RemoteSpawner.slots_cache[session] = False
 
+        slots = RemoteSpawner.slots_cache
         if runtime_task.spawner_handle is not None:
             slot = runtime_task.spawner_handle
+            if slots.get(slot, False):
+                raise RuntimeError(f"Remote slot {slot} is already reserved")
+            slots[slot] = True
         else:
-            slots = RemoteSpawner.slots_cache
             for key, value in slots.items():
                 if not value:
                     slot = key
@@ -178,6 +181,21 @@ class RemoteSpawner(Spawner, SpawnerMixin):
 
         session = runtime_task.spawner_handle
         LOG.info(f"Hostname: {session.host} Port: {session.port}")
+
+        status, output = RemoteSpawner.run_remote_cmd(
+            session,
+            "pgrep -f 'task-run'",
+            10,
+        )
+        if status == 0:
+            raise RuntimeError(
+                f"A previous task is still alive but only one task "
+                f"can run in a remote host ({session.host}) at a time"
+            )
+        elif status != 1:
+            logging.warning(
+                f"Could not check for previous remote task in {session.host}"
+            )
 
         setup_hook = self.config.get("spawner.remote.setup_hook")
         # Customize and deploy test data to the container

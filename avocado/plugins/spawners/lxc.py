@@ -157,10 +157,13 @@ class LXCSpawner(Spawner, SpawnerMixin):
             # TODO: spawner can look for free containers directly and populate these slots
             # for c in lxcontainer.list_containers(as_object=True): ...
 
+        slots = LXCSpawner.slots_cache
         if runtime_task.spawner_handle is not None:
             slot = runtime_task.spawner_handle
+            if slots.get(slot, False):
+                raise RuntimeError(f"LXC slot {slot} is already reserved")
+            slots[slot] = True
         else:
-            slots = LXCSpawner.slots_cache
             for key, value in slots.items():
                 if not value:
                     slot = key
@@ -257,6 +260,19 @@ class LXCSpawner(Spawner, SpawnerMixin):
         # Query some information
         LOG.info(f"Container state: {container.state}")
         LOG.info(f"Container ID: {container_id} PID: {container.init_pid}")
+
+        exitcode, _, _ = LXCSpawner.run_container_cmd(
+            container, ["pgrep", "-f", "task-run"]
+        )
+        if exitcode == 0:
+            raise RuntimeError(
+                f"A previous task is still alive but only one task "
+                f"can run in an LXC container {container.name} at a time"
+            )
+        elif exitcode != 1:
+            logging.warning(
+                f"Could not check for previous LXC task in {container.name}"
+            )
 
         exitcode, output, err = await LXCSpawner.run_container_cmd_async(
             container, entry_point_args

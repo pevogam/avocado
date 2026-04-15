@@ -38,7 +38,10 @@ class LXCSpawnerTest(Test):
 
         to_spawn = self.spawner.spawn_task(runtime_task)
         with mock.patch.object(
-            LXCSpawner, "run_container_cmd", return_value=(0, "", "")
+            LXCSpawner,
+            "run_container_cmd",
+            # status 1 means no previous task was detected
+            return_value=(1, "", ""),
         ):
             with mock.patch.object(
                 LXCSpawner, "run_container_cmd_async", return_value=(0, "", "")
@@ -58,7 +61,10 @@ class LXCSpawnerTest(Test):
 
         to_spawn = self.spawner.spawn_task(runtime_task)
         with mock.patch.object(
-            LXCSpawner, "run_container_cmd", return_value=(0, "", "")
+            LXCSpawner,
+            "run_container_cmd",
+            # status 1 means no previous task was detected
+            return_value=(1, "", ""),
         ):
             with mock.patch.object(
                 LXCSpawner, "run_container_cmd_async", return_value=(0, "", "")
@@ -78,7 +84,10 @@ class LXCSpawnerTest(Test):
 
         to_spawn = self.spawner.spawn_task(runtime_task)
         with mock.patch.object(
-            LXCSpawner, "run_container_cmd", return_value=(0, "", "")
+            LXCSpawner,
+            "run_container_cmd",
+            # status 1 means no previous task was detected
+            return_value=(1, "", ""),
         ):
             with mock.patch.object(
                 LXCSpawner, "run_container_cmd_async", return_value=(0, "", "")
@@ -97,7 +106,10 @@ class LXCSpawnerTest(Test):
 
         to_spawn = self.spawner.spawn_task(runtime_task)
         with mock.patch.object(
-            LXCSpawner, "run_container_cmd", return_value=(0, "", "")
+            LXCSpawner,
+            "run_container_cmd",
+            # status 1 means no previous task was detected
+            return_value=(1, "", ""),
         ):
             with mock.patch.object(
                 LXCSpawner, "run_container_cmd_async", return_value=(0, "", "")
@@ -116,7 +128,10 @@ class LXCSpawnerTest(Test):
 
         to_spawn = self.spawner.spawn_task(runtime_task)
         with mock.patch.object(
-            LXCSpawner, "run_container_cmd", return_value=(0, "", "")
+            LXCSpawner,
+            "run_container_cmd",
+            # status 1 means no previous task was detected
+            return_value=(1, "", ""),
         ):
             with mock.patch.object(
                 LXCSpawner, "run_container_cmd_async", return_value=(0, "", "")
