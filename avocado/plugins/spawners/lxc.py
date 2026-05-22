@@ -263,7 +263,7 @@ class LXCSpawner(Spawner, SpawnerMixin):
         )
         LOG.debug(f"Command exited with code {exitcode}")
         if exitcode != 0:
-            LOG.error(f"Error '{err}' on {container_id} with output:\n{output}")
+            LOG.error(f"Error exit code {exitcode}: '{err}' on {container_id} with output:\n{output}")
             return False
 
         return True
