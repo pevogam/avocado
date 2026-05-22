@@ -44,7 +44,10 @@ class LXCSpawnerTest(Test):
             return_value=(1, "", ""),
         ):
             with mock.patch.object(
-                LXCSpawner, "run_container_cmd_async", return_value=(0, "", "")
+                LXCSpawner,
+                "run_container_cmd_async",
+                # pid 123 (rather than <=0) means successful LXC attachment
+                return_value=(123, "", ""),
             ):
                 asyncio.run(to_spawn)
 
@@ -67,7 +70,10 @@ class LXCSpawnerTest(Test):
             return_value=(1, "", ""),
         ):
             with mock.patch.object(
-                LXCSpawner, "run_container_cmd_async", return_value=(0, "", "")
+                LXCSpawner,
+                "run_container_cmd_async",
+                # pid 123 (rather than <=0) means successful LXC attachment
+                return_value=(123, "", ""),
             ):
                 asyncio.run(to_spawn)
 
@@ -90,7 +96,10 @@ class LXCSpawnerTest(Test):
             return_value=(1, "", ""),
         ):
             with mock.patch.object(
-                LXCSpawner, "run_container_cmd_async", return_value=(0, "", "")
+                LXCSpawner,
+                "run_container_cmd_async",
+                # pid 123 (rather than <=0) means successful LXC attachment
+                return_value=(123, "", ""),
             ):
                 asyncio.run(to_spawn)
 
@@ -112,7 +121,10 @@ class LXCSpawnerTest(Test):
             return_value=(1, "", ""),
         ):
             with mock.patch.object(
-                LXCSpawner, "run_container_cmd_async", return_value=(0, "", "")
+                LXCSpawner,
+                "run_container_cmd_async",
+                # pid 123 (rather than <=0) means successful LXC attachment
+                return_value=(123, "", ""),
             ):
                 with self.assertRaises(RuntimeError):
                     asyncio.run(to_spawn)
@@ -134,7 +146,10 @@ class LXCSpawnerTest(Test):
             return_value=(1, "", ""),
         ):
             with mock.patch.object(
-                LXCSpawner, "run_container_cmd_async", return_value=(0, "", "")
+                LXCSpawner,
+                "run_container_cmd_async",
+                # pid 123 (rather than <=0) means successful LXC attachment
+                return_value=(123, "", ""),
             ):
                 with self.assertRaises(RuntimeError):
                     asyncio.run(to_spawn)
