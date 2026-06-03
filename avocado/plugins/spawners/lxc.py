@@ -149,7 +149,7 @@ class LXCSpawner(Spawner, SpawnerMixin):
         if len(LXCSpawner.slots_cache) == 0:
             # TODO: consider whether to provide persistence across runs via external storage
             LXCSpawner.slots_cache = {
-                k: False for k in self.config.get("spawner.lxc.slots") if k
+                lxc.Container(k): False for k in self.config.get("spawner.lxc.slots") if k
             }
             # TODO: spawner can look for free containers directly and populate these slots
             # for c in lxcontainer.list_containers(as_object=True): ...
@@ -179,13 +179,13 @@ class LXCSpawner(Spawner, SpawnerMixin):
         if runtime_task.spawner_handle is None:
             return False
 
-        container = lxc.Container(runtime_task.spawner_handle)
+        container = runtime_task.spawner_handle
         if not container.defined:
-            LOG.debug(f"Container {runtime_task.spawner_handle} is not defined")
+            LOG.debug(f"Container {container.name} is not defined")
             return False
         if not container.running:
             LOG.debug(
-                f"Container {runtime_task.spawner_handle} state is "
+                f"Container {container.name} state is "
                 f"{container.state} instead of RUNNING"
             )
             return False
@@ -224,8 +224,8 @@ class LXCSpawner(Spawner, SpawnerMixin):
         arch = self.config.get("spawner.lxc.arch")
         create_hook = self.config.get("spawner.lxc.create_hook")
 
-        container_id = runtime_task.spawner_handle
-        container = lxc.Container(container_id)
+        container = runtime_task.spawner_handle
+        container_id = container.name
         if not container.defined:
             # Create the container rootfs
             if not container.create(
@@ -293,7 +293,7 @@ class LXCSpawner(Spawner, SpawnerMixin):
             await asyncio.sleep(0.1)
 
     async def terminate_task(self, runtime_task):
-        container = lxc.Container(runtime_task.spawner_handle)
+        container = runtime_task.spawner_handle
 
         # Stop the container
         if not container.shutdown(30):
