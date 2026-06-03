@@ -3,6 +3,7 @@ import contextlib
 import logging
 import os
 import tempfile
+import time
 
 try:
     import lxc
@@ -189,9 +190,13 @@ class LXCSpawner(Spawner, SpawnerMixin):
             )
             return False
 
-        status, _, _ = LXCSpawner.run_container_cmd(
-            container, ["pgrep", "-r", "R,S", "-f", runtime_task.task.identifier]
+        status, stdout, stderr = LXCSpawner.run_container_cmd(
+            container, ["pgrep", "-r", "R,S", "-f", str(runtime_task.task.identifier)]
         )
+        LOG.debug(stdout)
+        if stderr:
+            LOG.error(stderr)
+
         return status == 0
 
     @with_slot_reservation
