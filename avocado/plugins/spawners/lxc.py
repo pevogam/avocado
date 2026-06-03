@@ -129,11 +129,7 @@ class LXCSpawner(Spawner, SpawnerMixin):
             pid = container.attach(
                 lxc.attach_run_command, command, stdout=tmp_out, stderr=tmp_err
             )
-            loop = asyncio.get_event_loop()
-            _, exitcode = await loop.run_in_executor(
-                None, os.waitpid, pid, os.WUNTRACED
-            )
-            return exitcode, tmp_out.read(), tmp_err.read()
+            return pid, tmp_out.read(), tmp_err.read()
 
     @contextlib.contextmanager
     def reserve_slot(self, runtime_task):
@@ -234,7 +230,7 @@ class LXCSpawner(Spawner, SpawnerMixin):
             # Customize and deploy test data to the container
             if create_hook:
                 customization_args = create_hook.split()
-                exitcode, output, err = await LXCSpawner.run_container_cmd_async(
+                exitcode, output, err = LXCSpawner.run_container_cmd(
                     container, customization_args
                 )
                 LOG.debug(f"Customization command exited with code {exitcode}")
@@ -264,11 +260,11 @@ class LXCSpawner(Spawner, SpawnerMixin):
                 "A previous task is still alive but only one task "
                 "can run in an LXC container at a time"
             )
-        exitcode, output, err = await LXCSpawner.run_container_cmd_async(
+        pid, output, err = await LXCSpawner.run_container_cmd_async(
             container, entry_point_args
         )
-        LOG.debug(f"Command exited with code {exitcode}")
-        if exitcode != 0:
+        LOG.debug(f"Task spawned in container with PID {pid}")
+        if pid <= 0:
             LOG.error(f"Error exit code {exitcode}: '{err}' on {container_id} with output:\n{output}")
             return False
 
