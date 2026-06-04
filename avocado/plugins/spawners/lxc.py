@@ -33,7 +33,8 @@ class LXCStreamsFile:
         return self.fd
 
     def read(self):
-        with open(self.path, "r", encoding="utf-8") as fp:
+        with os.fdopen(os.dup(self.fd), "r", encoding="utf-8") as fp:
+            fp.seek(0)
             return fp.read()
 
     def __enter__(self):
@@ -41,6 +42,11 @@ class LXCStreamsFile:
         return self
 
     def __exit__(self, *args):
+        if self.fd is not None:
+            try:
+                os.close(self.fd)
+            except OSError as error:
+                LOG.error(f"Could not clean up LXC stream: {error}")
         os.remove(self.path)
 
 
