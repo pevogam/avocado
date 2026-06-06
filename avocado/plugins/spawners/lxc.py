@@ -26,28 +26,35 @@ class LXCSpawnerException(Exception):
 
 class LXCStreamsFile:
     def __init__(self):
-        self.fd = None
+        self.file = None
         self.path = None
 
     def fileno(self):
-        return self.fd
+        return self.file.fileno()
 
     def read(self):
-        with os.fdopen(os.dup(self.fd), "r", encoding="utf-8") as fp:
-            fp.seek(0)
-            return fp.read()
+        self.file.flush()
+        self.file.seek(0)
+        return self.file.read().decode("utf-8", errors="replace")
 
     def __enter__(self):
-        self.fd, self.path = tempfile.mkstemp()
+        fd, self.path = tempfile.mkstemp()
+        self.file = os.fdopen(fd, "w+b")
         return self
 
     def __exit__(self, *args):
-        if self.fd is not None:
+        if self.file is not None:
             try:
-                os.close(self.fd)
+                self.file.close()
             except OSError as error:
                 LOG.error(f"Could not clean up LXC stream: {error}")
-        os.remove(self.path)
+        if self.path is not None:
+            try:
+                os.remove(self.path)
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                LOG.error(f"Could not remove temporary path {self.path}: {error}")
 
 
 class LXCSpawnerInit(Init):
