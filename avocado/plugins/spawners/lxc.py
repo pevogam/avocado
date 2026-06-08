@@ -135,6 +135,7 @@ class LXCSpawner(Spawner, SpawnerMixin):
             exitcode = container.attach_wait(
                 lxc.attach_run_command, command, stdout=tmp_out, stderr=tmp_err
             )
+            LOG.debug(f"Container sync command '{command}' returned exit code {exitcode}")
             return exitcode, tmp_out.read(), tmp_err.read()
 
     @staticmethod
@@ -143,6 +144,7 @@ class LXCSpawner(Spawner, SpawnerMixin):
             pid = container.attach(
                 lxc.attach_run_command, command, stdout=tmp_out, stderr=tmp_err
             )
+            LOG.debug(f"Container async command '{command}' returned PID {pid}")
             return pid, tmp_out.read(), tmp_err.read()
 
     @contextlib.contextmanager
@@ -276,12 +278,14 @@ class LXCSpawner(Spawner, SpawnerMixin):
         LOG.info(f"Container state: {container.state}")
         LOG.info(f"Container ID: {container_id} PID: {container.init_pid}")
 
-        exitcode, _, _ = LXCSpawner.run_container_cmd(container, ["prep", "-f", "task-run"])
+        exitcode, _, _ = LXCSpawner.run_container_cmd(container, ["pgrep", "-f", "task-run"])
         if exitcode == 0:
             raise RuntimeError(
                 "A previous task is still alive but only one task "
                 "can run in an LXC container at a time"
             )
+        elif exitcode != 0:
+            logging.warning(f"Could not check for previous LXC task in {container.name}")
         pid, output, err = await LXCSpawner.run_container_cmd_async(
             container, entry_point_args
         )
