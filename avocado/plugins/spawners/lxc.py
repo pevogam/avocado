@@ -17,7 +17,7 @@ from avocado.core.plugin_interfaces import Init, Spawner
 from avocado.core.settings import settings
 from avocado.core.spawners.common import SpawnCapabilities, SpawnerMixin, SpawnMethod
 
-LOG = logging.getLogger(__name__)
+LOG = logging.getLogger("avocado.job." + __name__)
 
 
 class LXCSpawnerException(Exception):
