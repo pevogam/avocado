@@ -207,7 +207,7 @@ class LXCSpawner(Spawner, SpawnerMixin):
 
         for _ in range(10):
             status, stdout, stderr = LXCSpawner.run_container_cmd(
-                container, ["pgrep", "-r", "R,S", "-f", str(runtime_task.task.identifier)]
+                container, ["pgrep", "-r", "R,S", "-f", "task-run -i " + str(runtime_task.task.identifier)]
             )
             LOG.debug(stdout)
             if stderr:
