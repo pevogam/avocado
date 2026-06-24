@@ -33,9 +33,12 @@ class LXCStreamsFile:
         return self.file.fileno()
 
     def read(self):
-        self.file.flush()
-        self.file.seek(0)
-        return self.file.read().decode("utf-8", errors="replace")
+        try:
+            self.file.flush()
+            self.file.seek(0)
+            return self.file.read().decode("utf-8", errors="replace")
+        except:
+            return "<error>"
 
     def __enter__(self):
         fd, self.path = tempfile.mkstemp()
