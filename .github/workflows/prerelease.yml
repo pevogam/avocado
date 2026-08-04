@@ -112,6 +112,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v7
+    - name: Set weekly TestPyPI version
+      run: |
+        version="$(cat VERSION).dev${{ github.run_number }}"
+        make -f Makefile.gh propagate-version VERSION="$version"
     - name: Build tarballs and wheels
       run: make -f Makefile.gh build-wheel check-wheel
     - name: Save tarballs and wheels as artifacts
