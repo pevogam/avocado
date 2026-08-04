@@ -6,6 +6,9 @@ on:
     - cron: "0 5 * * 1"
   workflow_dispatch:
 
+env:
+  SKIP: no-commit-to-branch
+
 jobs:
 
   make-check:
