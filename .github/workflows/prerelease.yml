@@ -53,6 +53,7 @@ jobs:
       - name: Install avocado
         run: |
           pip install -r requirements-dev.txt
+          python3 -m pip install --user --upgrade "setuptools<80"
           python3 setup.py develop --user
       - name: Avocado pre-release job
         run: python3 setup.py test --select=pre-release
