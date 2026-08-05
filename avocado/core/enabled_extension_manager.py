@@ -38,10 +38,28 @@ class EnabledExtensionManager(ExtensionManager):
 
     def enabled(self, extension):
         """
-        Checks configuration for explicit mention of plugin in a disable list
+        Check configuration for explicit mention of plugin in a disable list.
+
+        Defaults to checking for enabled extensions.
+        """
+        return self.enabled_extension(extension)
+
+    def enabled_extension(self, extension):
+        """
+        Check configuration for explicit mention of an extension in a disable list.
 
         If configuration section or key doesn't exist, it means no plugin
         is disabled.
         """
-        disabled = settings.as_dict().get("plugins.disable")
+        disabled = settings.as_dict().get("plugins.disable") or []
         return self.fully_qualified_name(extension) not in disabled
+
+    def enabled_entry_point(self, entry_point):
+        """
+        Check configuration for explicit mention of an entry point in a disable list.
+
+        If configuration section or key doesn't exist, it means no plugin
+        is disabled.
+        """
+        disabled = settings.as_dict().get("plugins.disable") or []
+        return self.fully_qualified_entry_point_name(entry_point) not in disabled
