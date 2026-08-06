@@ -42,6 +42,21 @@ TEST_SIZE = {
     "pre-release": 18,
 }
 
+SERIAL_SUITES = {
+    "functional-serial",
+    "nrunner-requirement",
+    "pre-release",
+    "vmimage-tests",
+    "vmimage-variants",
+}
+
+
+def _set_max_parallel_tasks(suites, max_parallel_tasks):
+    for suite in suites:
+        suite.config["run.max_parallel_tasks"] = (
+            1 if suite.name in SERIAL_SUITES else max_parallel_tasks
+        )
+
 
 class JobAPIFeaturesTest(Test):
     def check_directory_exists(self, path=None):
@@ -269,8 +284,19 @@ The list of test availables for --skip and --select are:
         action="append",
         default=[],
     )
+    parser.add_argument(
+        "-j",
+        "--max-parallel-tasks",
+        type=int,
+        help=(
+            "Maximum tasks for each parallel suite. Suites that require serial "
+            "execution remain limited to one task."
+        ),
+    )
 
     arg = parser.parse_args()
+    if arg.max_parallel_tasks is not None and arg.max_parallel_tasks < 1:
+        parser.error("--max-parallel-tasks must be greater than zero")
     return arg
 
 
@@ -886,6 +912,10 @@ def main(args):  # pylint: disable=W0621
         for suite in suites:
             if suite.name == "functional-parallel":
                 suite.config["run.max_parallel_tasks"] = max_parallel
+
+    max_parallel_tasks = getattr(args, "max_parallel_tasks", None)
+    if max_parallel_tasks is not None:
+        _set_max_parallel_tasks(suites, max_parallel_tasks)
 
     with Job(config, suites) as j:
         pre_job_test_result_dirs = set(os.listdir(os.path.dirname(j.logdir)))
