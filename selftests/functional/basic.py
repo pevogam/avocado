@@ -151,8 +151,13 @@ GNU_ECHO_BINARY = probe_binary("echo")
 if GNU_ECHO_BINARY is not None:
     if probe_binary("man") is not None:
         echo_cmd = f"man {os.path.basename(GNU_ECHO_BINARY)}"
-        echo_manpage = process.run(echo_cmd, env={"LANG": "C"}, encoding="ascii").stdout
-        if b"-e" not in echo_manpage:
+        echo_manpage = process.run(
+            echo_cmd,
+            env={"LANG": "C"},
+            encoding="ascii",
+            ignore_status=True,
+        )
+        if echo_manpage.exit_status == 0 and b"-e" not in echo_manpage.stdout:
             GNU_ECHO_BINARY = probe_binary("gecho")
 READ_BINARY = probe_binary("read")
 SLEEP_BINARY = probe_binary("sleep")
