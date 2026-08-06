@@ -450,7 +450,7 @@ def create_suite_job_api(args):  # pylint: disable=W0621
                 "value": 1,
                 "reference": ["examples/tests/sleeptenmin.py"],
                 "file": "job.log",
-                "content": "RuntimeError: Test interrupted by SIGTERM",
+                "content": "Test interrupted: Timeout reached",
                 "assert": True,
                 "exit_code": 8,
             },
