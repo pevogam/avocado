@@ -1,3 +1,4 @@
+import asyncio
 import heapq
 import logging
 
@@ -35,12 +36,31 @@ class StatusRepo:
         self._status_journal_summary = []
         #: Contains the task IDs keyed by the result received
         self._by_result = {}
+        #: Contains the most recently received finished message for each task.
+        #:
+        #: This is deliberately separate from ``_all_data``.  A running/log
+        #: message can arrive after a finished message, and in that case the
+        #: latest arbitrary message is not the task's terminal result.
+        self._finished_data = {}
+        #: Events used by state-machine workers waiting for a finished message.
+        self._finished_events = {}
 
     def _handle_task_finished(self, message):
         task_id = message["id"]
 
         result = message.get("result")
-        if result is not None and result.upper() not in STATUSES:
+        if result is None:
+            overridden = "error"
+            message["result"] = overridden
+            message["fail_reason"] = message.get("fail_reason") or (
+                "Runner error occurred: Finished message does not contain a result"
+            )
+            LOG.error(
+                'Task "%s" finished message has no result, changing to "%s"',
+                task_id,
+                overridden,
+            )
+        elif not isinstance(result, str) or result.upper() not in STATUSES:
             overridden = "error"
             message["result"] = overridden
             message["fail_reason"] = (
@@ -56,6 +76,14 @@ class StatusRepo:
 
         self._set_by_result(message)
         self._set_task_data(message)
+        # The result message handler later enriches and mutates the journaled
+        # dictionary (including replacing its ``status`` value).  Keep the
+        # repository's terminal record isolated from those presentation-side
+        # mutations.
+        self._finished_data[task_id] = message.copy()
+        finished_event = self._finished_events.get(task_id)
+        if finished_event is not None:
+            finished_event.set()
         LOG.debug('Task "%s" finished message: "%s"', task_id, message)
 
     def _handle_task_started(self, message):
@@ -100,6 +128,38 @@ class StatusRepo:
             return None
         return task_data[-1]
 
+    def get_finished_task_data(self, task_id):
+        """Return the finished message for a task, regardless of later data.
+
+        Status messages other than ``finished`` may arrive late.  Consumers
+        interested in a task result must use this method instead of assuming
+        that :meth:`get_latest_task_data` is a terminal message.
+        """
+        return self._finished_data.get(task_id)
+
+    async def wait_for_task_finished(self, task_id, timeout):
+        """Wait until a finished message for ``task_id`` is available.
+
+        :param task_id: task identifier
+        :param timeout: maximum number of seconds to wait
+        :raises asyncio.TimeoutError: when no finished message arrives in time
+        :returns: the task's finished message
+        """
+        finished_data = self.get_finished_task_data(task_id)
+        if finished_data is not None:
+            return finished_data
+
+        finished_event = self._finished_events.setdefault(task_id, asyncio.Event())
+
+        # Check once more after publishing the event to avoid losing an
+        # arrival between the initial lookup and event registration.
+        finished_data = self.get_finished_task_data(task_id)
+        if finished_data is not None:
+            return finished_data
+
+        await asyncio.wait_for(finished_event.wait(), timeout)
+        return self.get_finished_task_data(task_id)
+
     def status_journal_summary_pop(self):
         return heapq.heappop(self._status_journal_summary)
 
@@ -138,6 +198,18 @@ class StatusRepo:
         job_id = message.get("job_id")
         if job_id != self.job_id:
             LOG.warning("Received a message destined for a different job: %s", message)
+            return
+
+        task_id = message.get("id")
+        if message.get("status") == "finished" and task_id in self._finished_data:
+            terminal = self._finished_data[task_id]
+            LOG.warning(
+                'Ignoring duplicate finished message for task "%s" '
+                "(kept result=%r, duplicate result=%r)",
+                task_id,
+                terminal.get("result"),
+                message.get("result"),
+            )
             return
         message.pop("job_id")
 
