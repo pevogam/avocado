@@ -12,6 +12,12 @@ from avocado.core.utils import messages
 LOG = logging.getLogger(__name__)
 
 
+# A runner process normally sends its finished message before exiting.  Allow
+# the status server a small delivery grace period, but never let a missing
+# terminal message stall the state machine indefinitely.
+DEFAULT_TERMINAL_MESSAGE_TIMEOUT = 5.0
+
+
 class TaskStateMachine:
     """Represents all phases that a task can go through its life."""
 
@@ -140,17 +146,36 @@ class TaskStateMachine:
         :param status_reason: string reason. Optional.
         """
         async with self._lock:
-            if runtime_task not in self.finished:
-                if status_reason:
-                    runtime_task.status = status_reason
-                    LOG.debug(
-                        'Task "%s" finished with status: %s',
-                        runtime_task.task.identifier,
-                        status_reason,
-                    )
-                else:
-                    LOG.debug('Task "%s" finished', runtime_task.task.identifier)
-                self.finished.append(runtime_task)
+            self._finish_task_unlocked(runtime_task, status_reason)
+
+    def _finish_task_unlocked(self, runtime_task, status_reason=None):
+        """Finish a task while the caller holds the state-machine lock."""
+        if runtime_task not in self.finished:
+            if status_reason:
+                runtime_task.status = status_reason
+                LOG.debug(
+                    'Task "%s" finished with status: %s',
+                    runtime_task.task.identifier,
+                    status_reason,
+                )
+            else:
+                LOG.debug('Task "%s" finished', runtime_task.task.identifier)
+            self.finished.append(runtime_task)
+
+    async def finish_monitored_task(self, runtime_task, status_reason=None):
+        """Atomically move a monitored task to the finished queue.
+
+        A task can concurrently be removed from ``monitored`` by a worker
+        terminating the job.  In that case the terminating worker owns the
+        task and this returns ``False``.
+        """
+        async with self._lock:
+            try:
+                self.monitored.remove(runtime_task)
+            except ValueError:
+                return False
+            self._finish_task_unlocked(runtime_task, status_reason)
+        return True
 
 
 class Worker:
@@ -162,6 +187,7 @@ class Worker:
         max_running=None,
         task_timeout=None,
         failfast=False,
+        terminal_message_timeout=DEFAULT_TERMINAL_MESSAGE_TIMEOUT,
     ):
         self._state_machine = state_machine
         self._spawner = spawner
@@ -173,12 +199,24 @@ class Worker:
         self._max_running = max_running
         self._task_timeout = task_timeout
         self._failfast = failfast
+        if terminal_message_timeout is None:
+            terminal_message_timeout = DEFAULT_TERMINAL_MESSAGE_TIMEOUT
+        if terminal_message_timeout < 0:
+            raise ValueError("terminal_message_timeout must not be negative")
+        self._terminal_message_timeout = terminal_message_timeout
         LOG.debug("%s has been initialized", self)
 
     def __repr__(self):
-        fmt = '<Worker spawner="{}" max_triaging={} max_running={} task_timeout={}>'
+        fmt = (
+            '<Worker spawner="{}" max_triaging={} max_running={} '
+            "task_timeout={} terminal_message_timeout={}>"
+        )
         return fmt.format(
-            self._spawner, self._max_triaging, self._max_running, self._task_timeout
+            self._spawner,
+            self._max_triaging,
+            self._max_running,
+            self._task_timeout,
+            self._terminal_message_timeout,
         )
 
     async def _send_finished_tasks_message(self, terminate_tasks, reason):
@@ -212,13 +250,82 @@ class Worker:
             finish_message = messages.FinishedMessage.get(
                 "interrupted", f"Test interrupted: {reason}", id=task_id, job_id=job_id
             )
-            try:
-                current_status, _ = self._state_machine._status_repo._status[task_id]
-            except KeyError:
-                return
+            current_status = self._state_machine._status_repo.get_task_status(task_id)
             if current_status != "finished":
+                if current_status is None:
+                    start_message = messages.StartedMessage.get(
+                        output_dir=terminated_task.task.runnable.output_dir,
+                        id=task_id,
+                        job_id=job_id,
+                    )
+                    self._state_machine._status_repo.process_message(start_message)
                 self._state_machine._status_repo.process_message(log_message)
                 self._state_machine._status_repo.process_message(finish_message)
+
+    async def _get_terminal_task_data(self, runtime_task):
+        """Return terminal task data, synthesizing an error when it is lost."""
+        task_id = str(runtime_task.task.identifier)
+        status_repo = self._state_machine._status_repo
+        try:
+            return await status_repo.wait_for_task_finished(
+                task_id, self._terminal_message_timeout
+            )
+        except asyncio.TimeoutError:
+            task_data = status_repo.get_all_task_data(task_id) or []
+            recent_events = [
+                {
+                    key: event.get(key)
+                    for key in ("status", "type", "time", "result")
+                    if key in event
+                }
+                for event in task_data[-10:]
+            ]
+            reason = (
+                "Task runner exited without sending a finished status message "
+                f"within {self._terminal_message_timeout:g} seconds"
+            )
+            repository_status = status_repo.get_task_status(task_id)
+            job_id = runtime_task.task.job_id
+            log_message = messages.LogMessage.get(
+                f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())} | "
+                f"Runner error: {reason}",
+                id=task_id,
+                job_id=job_id,
+            )
+            finish_message = messages.FinishedMessage.get(
+                "error",
+                reason,
+                id=task_id,
+                job_id=job_id,
+                repository_status=repository_status,
+                status_event_count=len(task_data),
+                recent_status_events=recent_events,
+            )
+            # A job-wide termination worker may have removed the task while
+            # this worker was waiting.  In that case it owns terminal status
+            # generation, and must not be raced by a synthetic ERROR here.
+            async with self._state_machine.lock:
+                if runtime_task not in self._state_machine.monitored:
+                    return None
+                if status_repo.get_task_status(task_id) is None:
+                    start_message = messages.StartedMessage.get(
+                        output_dir=runtime_task.task.runnable.output_dir,
+                        id=task_id,
+                        job_id=job_id,
+                    )
+                    status_repo.process_message(start_message)
+                status_repo.process_message(log_message)
+                status_repo.process_message(finish_message)
+            LOG.error(
+                'Task "%s": %s (repository status=%r, event count=%d, '
+                "recent events=%r)",
+                task_id,
+                reason,
+                repository_status,
+                len(task_data),
+                recent_events,
+            )
+            return status_repo.get_finished_task_data(task_id)
 
     async def bootstrap(self):
         """Reads from requested, moves into triaging."""
@@ -250,8 +357,7 @@ class Worker:
             requirements_ok = await self._spawner.check_task_requirements(runtime_task)
             if requirements_ok:
                 LOG.debug(
-                    'Task "%s": requirements OK (will proceed to check '
-                    "dependencies)",
+                    'Task "%s": requirements OK (will proceed to check dependencies)',
                     runtime_task.task.identifier,
                 )
             else:
@@ -389,18 +495,21 @@ class Worker:
 
     async def monitor(self):
         """Reads from started, moves into finished."""
-        try:
-            async with self._state_machine.lock:
+        async with self._state_machine.lock:
+            try:
                 runtime_task = self._state_machine.started.pop(0)
-        except IndexError:
-            return
+            except IndexError:
+                return
+            # Keep the transition atomic and the task represented until its
+            # terminal status has been reconciled.  In particular, do not
+            # leave a task in no queue while waiting for a potentially delayed
+            # finished message.
+            self._state_machine.monitored.append(runtime_task)
 
         if self._spawner.is_task_alive(runtime_task):
             LOG.debug(
                 'Task "%s" is alive at monitor phase', runtime_task.task.identifier
             )
-            async with self._state_machine.lock:
-                self._state_machine._monitored.append(runtime_task)
             try:
                 if runtime_task.execution_timeout is None:
                     remaining = None
@@ -412,12 +521,6 @@ class Worker:
                 await self._send_finished_tasks_message(
                     [runtime_task], "Timeout reached"
                 )
-            async with self._state_machine.lock:
-                try:
-                    self._state_machine.monitored.remove(runtime_task)
-                except ValueError:
-                    # runtime_task has been terminated, there is no need to continue
-                    return
         else:
             LOG.debug(
                 'Task "%s" was very short lived, this may be '
@@ -426,37 +529,32 @@ class Worker:
                 runtime_task.task.identifier,
             )
 
-        # from here, this `task` ran, so, let's check
-        # its latest data in the status repo
-        latest_task_data = (
-            self._state_machine._status_repo.get_latest_task_data(
-                str(runtime_task.task.identifier)
-            )
-            or {}
-        )
-        # or maybe its results are not available yet
-        while latest_task_data.get("result") is None:
-            await asyncio.sleep(0.1)
-            latest_task_data = (
-                self._state_machine._status_repo.get_latest_task_data(
-                    str(runtime_task.task.identifier)
-                )
-                or {}
-            )
+        # A late running/log message must not obscure an earlier terminal
+        # result.  If the runner exited without sending one, bound the grace
+        # period and turn that runner protocol failure into a clear ERROR.
+        latest_task_data = await self._get_terminal_task_data(runtime_task)
+        if latest_task_data is None:
+            # A terminating worker took ownership while terminal status was
+            # being reconciled.
+            return
         if runtime_task.task.category != "test":
             async with self._state_machine.cache_lock:
                 await self._spawner.update_requirement_cache(
                     runtime_task, latest_task_data["result"].upper()
                 )
         runtime_task.result = latest_task_data["result"]
+        finalized = await self._state_machine.finish_monitored_task(
+            runtime_task, RuntimeTaskStatus.FINISHED
+        )
+        if not finalized:
+            # A terminating worker already removed this task.
+            return
         result_stats = set(
             key.upper() for key in self._state_machine._status_repo.result_stats.keys()
         )
         if self._failfast and not result_stats.isdisjoint(STATUSES_NOT_OK):
             await self._state_machine.abort(RuntimeTaskStatus.FAILFAST)
             raise JobFailFast("Interrupting job (failfast).")
-
-        await self._state_machine.finish_task(runtime_task, RuntimeTaskStatus.FINISHED)
 
     async def _terminate_task(self, runtime_task, task_status):
         runtime_task.status = task_status
@@ -468,17 +566,26 @@ class Worker:
         await self._state_machine.abort(task_status)
         terminated = []
         while True:
+            runtime_task = None
             async with self._state_machine.lock:
                 try:
                     runtime_task = self._state_machine.monitored.pop(0)
-                    await self._terminate_task(runtime_task, task_status)
-                    terminated.append(runtime_task)
                 except IndexError:
                     if (
                         len(self._state_machine.finished) + len(terminated)
-                        == self._state_machine.task_size
+                        >= self._state_machine.task_size
                     ):
                         break
+            if runtime_task is None:
+                # Other workers may still be moving started tasks to the
+                # monitored queue.  Do not busy-spin or hold the global state
+                # lock while waiting for them.
+                await asyncio.sleep(0.01)
+                continue
+            # Spawner shutdown can be slow.  It must not hold the global state
+            # lock, which is needed by the workers being terminated.
+            await self._terminate_task(runtime_task, task_status)
+            terminated.append(runtime_task)
         return terminated
 
     async def terminate_tasks_timeout(self):

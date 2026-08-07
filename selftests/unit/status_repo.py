@@ -50,9 +50,19 @@ class StatusRepo(TestCase):
         msg = {"id": "1-foo", "status": "finished"}
         self.status_repo._handle_task_finished(msg)
         self.assertEqual(
-            self.status_repo.get_all_task_data("1-foo"), [{"status": "finished"}]
+            self.status_repo.get_all_task_data("1-foo"),
+            [
+                {
+                    "status": "finished",
+                    "result": "error",
+                    "fail_reason": (
+                        "Runner error occurred: Finished message does not contain "
+                        "a result"
+                    ),
+                }
+            ],
         )
-        self.assertEqual(self.status_repo._by_result.get(None), ["1-foo"])
+        self.assertEqual(self.status_repo._by_result.get("error"), ["1-foo"])
 
     def test_handle_task_finished_result(self):
         msg = {"id": "1-foo", "status": "finished", "result": "pass"}
@@ -115,6 +125,57 @@ class StatusRepo(TestCase):
             self.status_repo.get_latest_task_data("1-foo"),
             {"status": "running", "time": 1597894378.6103745},
         )
+
+    def test_finished_data_is_not_obscured_by_late_running_data(self):
+        finished = {
+            "id": "1-foo",
+            "status": "finished",
+            "result": "pass",
+            "time": 1597894378.0,
+            "job_id": "0000000000000000000000000000000000000000",
+        }
+        running = {
+            "id": "1-foo",
+            "status": "running",
+            "time": 1597894379.0,
+            "job_id": "0000000000000000000000000000000000000000",
+        }
+
+        self.status_repo.process_message(finished)
+        self.status_repo.process_message(running)
+
+        self.assertEqual(
+            self.status_repo.get_latest_task_data("1-foo")["status"], "running"
+        )
+        self.assertEqual(
+            self.status_repo.get_finished_task_data("1-foo")["result"], "pass"
+        )
+        self.assertEqual(self.status_repo.get_task_status("1-foo"), "finished")
+
+    def test_first_finished_message_is_authoritative(self):
+        first = {
+            "id": "1-foo",
+            "status": "finished",
+            "result": "pass",
+            "time": 1597894378.0,
+            "job_id": "0000000000000000000000000000000000000000",
+        }
+        duplicate = {
+            "id": "1-foo",
+            "status": "finished",
+            "result": "fail",
+            "time": 1597894379.0,
+            "job_id": "0000000000000000000000000000000000000000",
+        }
+
+        self.status_repo.process_message(first)
+        self.status_repo.process_message(duplicate)
+
+        self.assertEqual(
+            self.status_repo.get_finished_task_data("1-foo")["result"], "pass"
+        )
+        self.assertEqual(self.status_repo.result_stats, {"pass": 1})
+        self.assertEqual(len(self.status_repo.get_all_task_data("1-foo")), 1)
 
     def test_task_status_time(self):
         msg = {
