@@ -83,11 +83,11 @@ class JsonResultTest(TestCaseTmpDir):
     def test_variant(self):
         cmd_line = (
             f"{AVOCADO} run examples/tests/passtest.py "
-            "--mux-yaml examples/yaml_to_mux/simple_vars.yaml "
+            "--json-variants-load selftests/functional/plugin/result_variants.json "
             f"--job-results-dir {self.tmpdir.name} --disable-sysinfo "
             "--max-parallel-tasks=1"
         )
-        process.run(cmd_line, ignore_status=True)
+        process.run(cmd_line)
         xunit_path = path.join(self.tmpdir.name, "latest", "results.xml")
 
         with open(xunit_path, "rb") as fp:
