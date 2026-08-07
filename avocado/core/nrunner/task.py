@@ -13,13 +13,16 @@ from avocado.core.nrunner.runnable import (
 
 LOG = logging.getLogger(__name__)
 
+# Status delivery is on the runner's critical path.  Keep a non-responsive
+# receiver from blocking the runner (and therefore task completion) forever.
+DEFAULT_STATUS_SOCKET_TIMEOUT = 30.0
+
 #: The default category for tasks, and the value that will cause the
 #: task results to be included in the job results
 TASK_DEFAULT_CATEGORY = "test"
 
 
 class StatusEncoder(json.JSONEncoder):
-
     # pylint: disable=E0202
     def default(self, o):
         if isinstance(o, bytes):
@@ -38,52 +41,126 @@ class TaskStatusService:
     TODO: make the interface generic and this just one of the implementations
     """
 
-    def __init__(self, uri):
+    def __init__(self, uri, timeout=DEFAULT_STATUS_SOCKET_TIMEOUT):
         self.uri = uri
+        self.timeout = timeout
         self._connection = None
+
+    #: Number of attempts made while waiting for a newly started status
+    #: server.  Runners and the status server are started independently, so
+    #: the first connection has to tolerate that race.
+    CONNECTION_ATTEMPTS = 600
+    CONNECTION_RETRY_INTERVAL = 1
 
     @property
     def connection(self):
-        if not self._connection:
+        if self._connection is None:
             self._create_connection()
         return self._connection
 
-    def _create_connection(self):
+    def _close_connection(self):
+        """Close and forget the current connection, if any."""
+        connection = self._connection
+        self._connection = None
+        if connection is None:
+            return
+        try:
+            connection.close()
+        except OSError as error:
+            LOG.debug(
+                "Error while closing status connection with %s: %s",
+                self.uri,
+                error,
+            )
+
+    def _create_connection(self, retry=True):
         """
         Creates connection with `self.uri` based on `socket.create_connection`
+
+        The initial connection retries because the runner may win the startup
+        race with the status server.  A reconnect after an established
+        connection fails is attempted only once so a disappeared status
+        server cannot stall the task for several minutes.
         """
+        self._close_connection()
         if ":" in self.uri:
             host, port = self.uri.split(":")
             port = int(port)
-            for _ in range(600):
+            attempts = self.CONNECTION_ATTEMPTS if retry else 1
+            for attempt in range(1, attempts + 1):
                 try:
-                    self._connection = socket.create_connection((host, port))
-                    break
+                    self._connection = socket.create_connection(
+                        (host, port), timeout=self.timeout
+                    )
+                    LOG.debug("Connected to task status service at %s", self.uri)
+                    return
                 except ConnectionRefusedError as error:
-                    LOG.warning(error)
-                    time.sleep(1)
-            else:
-                self._connection = socket.create_connection((host, port))
+                    if attempt == attempts:
+                        raise
+                    LOG.warning(
+                        "Task status service at %s refused connection "
+                        "(attempt %d/%d): %s",
+                        self.uri,
+                        attempt,
+                        attempts,
+                        error,
+                    )
+                    time.sleep(self.CONNECTION_RETRY_INTERVAL)
         else:
-            self._connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            self._connection.connect(self.uri)
+            connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                connection.settimeout(self.timeout)
+                connection.connect(self.uri)
+            except OSError:
+                connection.close()
+                raise
+            self._connection = connection
+            LOG.debug("Connected to task status service at %s", self.uri)
 
     def post(self, status):
-        data = json_dumps(status)
+        data = (json_dumps(status) + "\n").encode("ascii")
+        task_id = status.get("id")
+        task_status = status.get("status")
         try:
-            self.connection.send(data.encode("ascii") + "\n".encode("ascii"))
-        except BrokenPipeError:
+            # A status message is newline framed.  A plain send() is allowed
+            # to write only part of it and silently corrupt the stream.
+            self.connection.sendall(data)
+        except OSError as error:
+            LOG.warning(
+                "Failed to send task status message to %s "
+                "(task=%r, status=%r, size=%d, timeout=%r); "
+                "reconnecting once: %s",
+                self.uri,
+                task_id,
+                task_status,
+                len(data),
+                self.timeout,
+                error,
+            )
+            self._close_connection()
             try:
-                self._create_connection()
-                self.connection.send(data.encode("ascii") + "\n".encode("ascii"))
-            except ConnectionRefusedError:
-                LOG.warning(f"Connection with {self.uri} has been lost.")
+                self._create_connection(retry=False)
+                self.connection.sendall(data)
+            except OSError as reconnect_error:
+                self._close_connection()
+                LOG.warning(
+                    "Connection with %s has been lost. "
+                    "Task status message was not delivered "
+                    "(task=%r, status=%r, size=%d): %s",
+                    self.uri,
+                    task_id,
+                    task_status,
+                    len(data),
+                    reconnect_error,
+                )
                 return False
+            LOG.info("Reconnected to task status service at %s", self.uri)
         return True
 
     def close(self):
-        if self.connection is not None:
-            self.connection.close()
+        # Do not use the lazy ``connection`` property here.  Closing a service
+        # that was never used must not establish a new connection.
+        self._close_connection()
 
     def __repr__(self):
         return f'<TaskStatusService uri="{self.uri}">'
@@ -222,21 +299,25 @@ class Task:
         runner = runner_klass()
         running_status_services = self.status_services
         damaged_status_services = []
-        for status in runner.run(self.runnable):
-            if status["status"] == "started":
-                status.update({"output_dir": self.runnable.output_dir})
-            status.update({"id": self.identifier})
-            if self.job_id is not None:
-                status.update({"job_id": self.job_id})
-            for status_service in running_status_services:
-                if not status_service.post(status):
-                    damaged_status_services.append(status_service)
-            if damaged_status_services:
-                running_status_services = list(
-                    filter(
-                        lambda s: s not in damaged_status_services,
-                        running_status_services,
+        try:
+            for status in runner.run(self.runnable):
+                if status["status"] == "started":
+                    status.update({"output_dir": self.runnable.output_dir})
+                status.update({"id": self.identifier})
+                if self.job_id is not None:
+                    status.update({"job_id": self.job_id})
+                for status_service in running_status_services:
+                    if not status_service.post(status):
+                        damaged_status_services.append(status_service)
+                if damaged_status_services:
+                    running_status_services = list(
+                        filter(
+                            lambda s: s not in damaged_status_services,
+                            running_status_services,
+                        )
                     )
-                )
-                damaged_status_services.clear()
-            yield status
+                    damaged_status_services.clear()
+                yield status
+        finally:
+            for status_service in self.status_services:
+                status_service.close()
