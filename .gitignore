@@ -3,6 +3,7 @@
 .settings
 .coverage
 .idea/*
+.venv
 coverage.xml
 xunit.xml
 tmp/*
