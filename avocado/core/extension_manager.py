@@ -90,6 +90,8 @@ class ExtensionManager:
 
         # load plugins
         for ep in get_entry_points_for(self.namespace):
+            if not self.enabled_entry_point(ep):
+                continue
             try:
                 plugin = ep.load()
                 obj = plugin(**invoke_kwds)
@@ -110,6 +112,16 @@ class ExtensionManager:
         """
         return True
 
+    def enabled_entry_point(self, entry_point):  # pylint: disable=W0613,R0201
+        """
+        Default configuration on whether an entry point should be imported.
+
+        Subclasses can reject an entry point before loading its module if needed.
+        This matters for explicitly disabled plugins whose dependencies may not be
+        available or whose import has side effects.
+        """
+        return True
+
     def plugin_type(self):
         """
         Subset of entry points namespace for this dispatcher
@@ -125,12 +137,30 @@ class ExtensionManager:
 
     def fully_qualified_name(self, extension):
         """
-        Returns the Avocado fully qualified plugin name
+        Return the Avocado fully qualified plugin name.
+
+        :param extension: an Extension instance
+        :type extension: :class:`Extension`
+        """
+        return self.fully_qualified_extension_name(extension)
+
+    def fully_qualified_extension_name(self, extension):
+        """
+        Return the Avocado fully qualified plugin name via extension.
 
         :param extension: an Extension instance
         :type extension: :class:`Extension`
         """
         return f"{self.plugin_type()}.{extension.entry_point.name}"
+
+    def fully_qualified_entry_point_name(self, entry_point):
+        """
+        Return the Avocado fully qualified plugin name via entry point.
+
+        :param entry_point: an EntryPoint instance
+        :type entry_point: :class:`importlib.metadata.EntryPoint`
+        """
+        return f"{self.plugin_type()}.{entry_point.name}"
 
     def settings_section(self):
         """

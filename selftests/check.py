@@ -1,13 +1,113 @@
 #!/usr/bin/env python3
 
 import argparse
+import atexit
 import copy
 import glob
 import multiprocessing
 import os
 import platform
 import re
+import shutil
 import sys
+import tempfile
+from importlib.metadata import distributions
+
+SELFTESTS_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OPTIONAL_PLUGINS = {
+    "ansible": "avocado-framework-plugin-ansible",
+    "golang": "avocado-framework-plugin-golang",
+    "html": "avocado-framework-plugin-result-html",
+    "robot": "avocado-framework-plugin-robot",
+    "varianter_cit": "avocado-framework-plugin-varianter-cit",
+    "varianter_yaml_to_mux": "avocado-framework-plugin-varianter-yaml-to-mux",
+}
+SELFTEST_PLUGIN_DISTRIBUTIONS = {"magic", "avocado-rogue"}
+
+
+def _distribution_name(distribution):
+    """Return a normalized distribution name."""
+    name = distribution.metadata.get("Name", "")
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _external_plugins(allowed_distributions):
+    """Return installed Avocado plugins that do not belong to this tree."""
+    disabled = set()
+    for distribution in distributions():
+        if _distribution_name(distribution) in allowed_distributions:
+            continue
+        for entry_point in distribution.entry_points:
+            if entry_point.group.startswith("avocado.plugins."):
+                plugin_type = entry_point.group.removeprefix("avocado.plugins.")
+                disabled.add(f"{plugin_type}.{entry_point.name}")
+    return sorted(disabled)
+
+
+def _disabled_plugin_checks_from_argv():
+    """Read plugin exclusions before importing Avocado and its plugins."""
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--disable-plugin-checks", action="append", default=[])
+    parsed, _ = parser.parse_known_args()
+    return {
+        plugin for value in parsed.disable_plugin_checks for plugin in value.split(",")
+    }
+
+
+def _setup_isolated_environment():
+    """Keep source-tree selftests independent of the host installation if any."""
+    disabled_plugin_checks = _disabled_plugin_checks_from_argv()
+    enabled_optional_plugins = {
+        name: distribution
+        for name, distribution in OPTIONAL_PLUGINS.items()
+        if name not in disabled_plugin_checks
+    }
+    python_paths = [
+        SELFTESTS_ROOT,
+        *(
+            os.path.join(SELFTESTS_ROOT, "optional_plugins", plugin)
+            for plugin in enabled_optional_plugins
+        ),
+    ]
+    inherited_python_path = os.environ.get("PYTHONPATH")
+    if inherited_python_path:
+        inherited_paths = {
+            os.path.abspath(path)
+            for path in inherited_python_path.split(os.pathsep)
+            if path
+        }
+        sys.path[:] = [
+            path
+            for path in sys.path
+            if os.path.abspath(path) not in inherited_paths
+            or os.path.abspath(path) == SELFTESTS_ROOT
+        ]
+    python_paths = list(dict.fromkeys(os.path.abspath(path) for path in python_paths))
+    os.environ["PYTHONPATH"] = os.pathsep.join(python_paths)
+    for path in reversed(python_paths):
+        if path not in sys.path:
+            sys.path.insert(0, path)
+
+    # Settings treats VIRTUAL_ENV as both its system and user configuration
+    # root. Pointing it at an empty temporary directory prevents /etc and
+    # ~/.config from changing selftest behavior, and is inherited by every
+    # runner and avocado subprocess started below.
+    isolation_dir = tempfile.mkdtemp(prefix="selftests-config-")
+    os.environ["VIRTUAL_ENV"] = isolation_dir
+    config_dir = os.path.join(isolation_dir, "etc", "avocado")
+    os.makedirs(config_dir)
+    config_path = os.path.join(config_dir, "avocado.conf")
+    with open(config_path, "w", encoding="utf-8") as config_file:
+        allowed_distributions = {"avocado-framework"}
+        allowed_distributions.update(enabled_optional_plugins.values())
+        allowed_distributions.update(SELFTEST_PLUGIN_DISTRIBUTIONS)
+        config_file.write(
+            "[plugins]\n" f"disable = {_external_plugins(allowed_distributions)!r}\n"
+        )
+    atexit.register(shutil.rmtree, isolation_dir, ignore_errors=True)
+
+
+_setup_isolated_environment()
 
 from avocado import Test
 from avocado.core import exit_codes
@@ -27,7 +127,7 @@ TEST_SIZE = {
     "job-api-check-tmp-directory-exists": 1,
     "nrunner-interface": 90,
     "nrunner-requirement": 28,
-    "unit": 1027,
+    "unit": 1028,
     "jobs": 11,
     "functional-parallel": 368,
     "functional-serial": 7,
@@ -41,6 +141,31 @@ TEST_SIZE = {
     "vmimage-tests": 35,
     "pre-release": 18,
 }
+
+
+def _optional_plugin_checks_enabled(plugin_name, disabled_plugins):
+    distribution_name = OPTIONAL_PLUGINS.get(plugin_name)
+    return (
+        distribution_name is not None
+        and plugin_name not in disabled_plugins
+        and python_module_available(distribution_name)
+    )
+
+
+SERIAL_SUITES = {
+    "functional-serial",
+    "nrunner-requirement",
+    "pre-release",
+    "vmimage-tests",
+    "vmimage-variants",
+}
+
+
+def _set_max_parallel_tasks(suites, max_parallel_tasks):
+    for suite in suites:
+        suite.config["run.max_parallel_tasks"] = (
+            1 if suite.name in SERIAL_SUITES else max_parallel_tasks
+        )
 
 
 class JobAPIFeaturesTest(Test):
@@ -269,8 +394,19 @@ The list of test availables for --skip and --select are:
         action="append",
         default=[],
     )
+    parser.add_argument(
+        "-j",
+        "--max-parallel-tasks",
+        type=int,
+        help=(
+            "Maximum tasks for each parallel suite. Suites that require serial "
+            "execution remain limited to one task."
+        ),
+    )
 
     arg = parser.parse_args()
+    if arg.max_parallel_tasks is not None and arg.max_parallel_tasks < 1:
+        parser.error("--max-parallel-tasks must be greater than zero")
     return arg
 
 
@@ -424,7 +560,7 @@ def create_suite_job_api(args):  # pylint: disable=W0621
                 "value": 1,
                 "reference": ["examples/tests/sleeptenmin.py"],
                 "file": "job.log",
-                "content": "RuntimeError: Test interrupted by SIGTERM",
+                "content": "Test interrupted: Timeout reached",
                 "assert": True,
                 "exit_code": 8,
             },
@@ -637,6 +773,7 @@ def create_suites(args):  # pylint: disable=W0621
 
     if (
         python_module_available("avocado-framework-plugin-golang")
+        and shutil.which("avocado-runner-golang") is not None
         and "golang" not in args.disable_plugin_checks
     ):
         config_nrunner_interface["run.dict_variants"].append(
@@ -648,6 +785,7 @@ def create_suites(args):  # pylint: disable=W0621
 
     if (
         python_module_available("avocado-framework-plugin-robot")
+        and shutil.which("avocado-runner-robot") is not None
         and "robot" not in args.disable_plugin_checks
     ):
         config_nrunner_interface["run.dict_variants"].append(
@@ -659,6 +797,7 @@ def create_suites(args):  # pylint: disable=W0621
 
     if (
         python_module_available("avocado-framework-plugin-ansible")
+        and shutil.which("avocado-runner-ansible-module") is not None
         and "ansible" not in args.disable_plugin_checks
     ):
         config_nrunner_interface["run.dict_variants"].append(
@@ -737,7 +876,7 @@ def create_suites(args):  # pylint: disable=W0621
         config_check_optional["resolver.references"] = []
         for optional_plugin in glob.glob("optional_plugins/*"):
             plugin_name = os.path.basename(optional_plugin)
-            if plugin_name not in args.disable_plugin_checks:
+            if _optional_plugin_checks_enabled(plugin_name, args.disable_plugin_checks):
                 pattern = f"{optional_plugin}/tests/*"
                 config_check_optional["resolver.references"] += glob.glob(pattern)
 
@@ -787,6 +926,12 @@ def create_suites(args):  # pylint: disable=W0621
 
 def main(args):  # pylint: disable=W0621
 
+    args.disable_plugin_checks = [
+        plugin for value in args.disable_plugin_checks for plugin in value.split(",")
+    ]
+    args.select = [item for value in args.select for item in value.split(",")]
+    args.skip = [item for value in args.skip for item in value.split(",")]
+
     args.dict_tests = {
         "static-checks": False,
         "job-api": False,
@@ -802,26 +947,14 @@ def main(args):  # pylint: disable=W0621
         "pre-release": False,
     }
 
-    if python_module_available("avocado-framework-plugin-golang"):
-        TEST_SIZE["optional-plugins"] += TEST_SIZE["optional-plugins-golang"]
-    if python_module_available("avocado-framework-plugin-result-html"):
-        TEST_SIZE["optional-plugins"] += TEST_SIZE["optional-plugins-html"]
-    if python_module_available("avocado-framework-plugin-robot"):
-        TEST_SIZE["optional-plugins"] += TEST_SIZE["optional-plugins-robot"]
-    if python_module_available("avocado-framework-plugin-varianter-cit"):
-        TEST_SIZE["optional-plugins"] += TEST_SIZE["optional-plugins-varianter_cit"]
-    if python_module_available("avocado-framework-plugin-varianter-yaml-to-mux"):
-        TEST_SIZE["optional-plugins"] += TEST_SIZE[
-            "optional-plugins-varianter_yaml_to_mux"
-        ]
-
-    # Make a list of strings instead of a list with a single string
-    if len(args.disable_plugin_checks) > 0:
-        args.disable_plugin_checks = args.disable_plugin_checks[0].split(",")
-    if len(args.select) > 0:
-        args.select = args.select[0].split(",")
-    if len(args.skip) > 0:
-        args.skip = args.skip[0].split(",")
+    optional_plugins_size = 0
+    for plugin_name in OPTIONAL_PLUGINS:
+        size_key = f"optional-plugins-{plugin_name}"
+        if size_key in TEST_SIZE and _optional_plugin_checks_enabled(
+            plugin_name, args.disable_plugin_checks
+        ):
+            optional_plugins_size += TEST_SIZE[size_key]
+    TEST_SIZE["optional-plugins"] = optional_plugins_size
 
     # Print features covered in this test
     if args.list_features:
@@ -886,6 +1019,10 @@ def main(args):  # pylint: disable=W0621
         for suite in suites:
             if suite.name == "functional-parallel":
                 suite.config["run.max_parallel_tasks"] = max_parallel
+
+    max_parallel_tasks = getattr(args, "max_parallel_tasks", None)
+    if max_parallel_tasks is not None:
+        _set_max_parallel_tasks(suites, max_parallel_tasks)
 
     with Job(config, suites) as j:
         pre_job_test_result_dirs = set(os.listdir(os.path.dirname(j.logdir)))

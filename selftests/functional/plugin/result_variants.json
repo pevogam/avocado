@@ -1,0 +1,16 @@
+[
+  {
+    "paths": ["/run/*"],
+    "variant_id": "run-first-febe",
+    "variant": [
+      ["/run/first", [["/run/first", "variable_one", 1]]]
+    ]
+  },
+  {
+    "paths": ["/run/*"],
+    "variant_id": "run-second-bafe",
+    "variant": [
+      ["/run/second", [["/run/second", "variable_two", 2]]]
+    ]
+  }
+]

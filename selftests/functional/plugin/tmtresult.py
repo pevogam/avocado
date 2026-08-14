@@ -1,13 +1,18 @@
 import re
+import unittest
 from os import path
 
-import yaml
+try:
+    import yaml
+except ImportError:
+    yaml = None
 
 from avocado.utils import process
 from selftests.utils import AVOCADO, TestCaseTmpDir
 
 
 class TMTResultTest(TestCaseTmpDir):
+    @unittest.skipUnless(yaml, "PyYAML module not available")
     def test_logfile(self):
         cmd_line = (
             f"{AVOCADO} run examples/tests/failtest.py examples/tests/passtest.py"
