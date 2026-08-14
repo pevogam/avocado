@@ -65,7 +65,7 @@ class ExecTestRunner(BaseRunner):
         workdir = runnable.kwargs.get("AVOCADO_TEST_WORKDIR")
         if (
             workdir is not None
-            and runnable.config.get("run.keep_tmp") is not None
+            and not runnable.config.get("run.keep_tmp")
             and os.path.exists(workdir)
         ):
             shutil.rmtree(workdir)
