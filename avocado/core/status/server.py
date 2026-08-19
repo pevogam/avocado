@@ -11,6 +11,11 @@ LOG = logging.getLogger(__name__)
 class StatusServer:
     """Server that listens for status messages and updates a StatusRepo."""
 
+    # StreamReader.readline() does not suspend while complete records are
+    # already buffered.  Bound the amount of synchronous work one hot client
+    # can perform before other connections, workers and timers get a turn.
+    _RECORDS_PER_EVENT_LOOP_TURN = 64
+
     def __init__(self, uri, repo):
         """Initializes a new StatusServer.
 
@@ -94,6 +99,7 @@ class StatusServer:
 
         sequence = 0
         received_bytes = 0
+        records_this_turn = 0
         try:
             while True:
                 try:
@@ -115,7 +121,6 @@ class StatusServer:
                     # clears its buffered fragment) before raising ValueError.
                     # Continue so a terminal message already buffered behind
                     # it still reaches the repository.
-                    continue
                 except asyncio.LimitOverrunError as error:
                     # readline() normally translates this into ValueError and
                     # recovers its buffer.  If a custom reader exposes it
@@ -145,38 +150,46 @@ class StatusServer:
                         "Unexpected error reading status message from %r", peer
                     )
                     return
+                else:
+                    if not raw_message:
+                        return
 
-                if not raw_message:
-                    return
+                    sequence += 1
+                    message_size = len(raw_message)
+                    received_bytes += message_size
+                    try:
+                        self._repo.process_raw_message(raw_message)
+                    except StatusMsgInvalidJSONError:
+                        preview = raw_message[:256]
+                        if message_size > len(preview):
+                            preview += b"..."
+                        LOG.warning(
+                            "Invalid JSON in internal status message from %r "
+                            "(sequence=%d, size=%d, preview=%r)",
+                            peer,
+                            sequence,
+                            message_size,
+                            preview,
+                        )
+                    except Exception:  # pylint: disable=W0718
+                        # A malformed status must not terminate the callback
+                        # and silently discard all messages that follow it on
+                        # the same connection (especially a terminal status).
+                        LOG.exception(
+                            "Unexpected error processing internal status message "
+                            "from %r (sequence=%d, size=%d)",
+                            peer,
+                            sequence,
+                            message_size,
+                        )
 
-                sequence += 1
-                message_size = len(raw_message)
-                received_bytes += message_size
-                try:
-                    self._repo.process_raw_message(raw_message)
-                except StatusMsgInvalidJSONError:
-                    preview = raw_message[:256]
-                    if message_size > len(preview):
-                        preview += b"..."
-                    LOG.warning(
-                        "Invalid JSON in internal status message from %r "
-                        "(sequence=%d, size=%d, preview=%r)",
-                        peer,
-                        sequence,
-                        message_size,
-                        preview,
-                    )
-                except Exception:  # pylint: disable=W0718
-                    # A malformed status must not terminate the callback and
-                    # silently discard all messages that follow it on the same
-                    # connection (especially a terminal status).
-                    LOG.exception(
-                        "Unexpected error processing internal status message "
-                        "from %r (sequence=%d, size=%d)",
-                        peer,
-                        sequence,
-                        message_size,
-                    )
+                # Recoverable oversized records consume a turn as well, or a
+                # client with many malformed buffered records could still
+                # monopolize the loop.
+                records_this_turn += 1
+                if records_this_turn >= self._RECORDS_PER_EVENT_LOOP_TURN:
+                    records_this_turn = 0
+                    await asyncio.sleep(0)
         finally:
             LOG.debug(
                 "Status client connection from %r closed after %d message(s) "
