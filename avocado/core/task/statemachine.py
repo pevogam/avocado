@@ -271,42 +271,52 @@ class Worker:
                 task_id, self._terminal_message_timeout
             )
         except asyncio.TimeoutError:
-            task_data = status_repo.get_all_task_data(task_id) or []
-            recent_events = [
-                {
-                    key: event.get(key)
-                    for key in ("status", "type", "time", "result")
-                    if key in event
-                }
-                for event in task_data[-10:]
-            ]
-            reason = (
-                "Task runner exited without sending a finished status message "
-                f"within {self._terminal_message_timeout:g} seconds"
-            )
-            repository_status = status_repo.get_task_status(task_id)
-            job_id = runtime_task.task.job_id
-            log_message = messages.LogMessage.get(
-                f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())} | "
-                f"Runner error: {reason}",
-                id=task_id,
-                job_id=job_id,
-            )
-            finish_message = messages.FinishedMessage.get(
-                "error",
-                reason,
-                id=task_id,
-                job_id=job_id,
-                repository_status=repository_status,
-                status_event_count=len(task_data),
-                recent_status_events=recent_events,
-            )
             # A job-wide termination worker may have removed the task while
             # this worker was waiting.  In that case it owns terminal status
             # generation, and must not be raced by a synthetic ERROR here.
             async with self._state_machine.lock:
                 if runtime_task not in self._state_machine.monitored:
                     return None
+
+                # asyncio.wait_for() may decide to time out immediately
+                # before the status callback publishes a real finished
+                # message.  The lock acquisition above is the only await in
+                # this recovery path, so rechecking here makes the decision
+                # and synthetic insertion atomic on this event loop.
+                finished_data = status_repo.get_finished_task_data(task_id)
+                if finished_data is not None:
+                    return finished_data
+
+                task_data = status_repo.get_all_task_data(task_id) or []
+                recent_events = [
+                    {
+                        key: event.get(key)
+                        for key in ("status", "type", "time", "result")
+                        if key in event
+                    }
+                    for event in task_data[-10:]
+                ]
+                reason = (
+                    "Task runner exited without sending a finished status message "
+                    f"within {self._terminal_message_timeout:g} seconds"
+                )
+                repository_status = status_repo.get_task_status(task_id)
+                job_id = runtime_task.task.job_id
+                log_message = messages.LogMessage.get(
+                    f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())} | "
+                    f"Runner error: {reason}",
+                    id=task_id,
+                    job_id=job_id,
+                )
+                finish_message = messages.FinishedMessage.get(
+                    "error",
+                    reason,
+                    id=task_id,
+                    job_id=job_id,
+                    repository_status=repository_status,
+                    status_event_count=len(task_data),
+                    recent_status_events=recent_events,
+                )
                 if status_repo.get_task_status(task_id) is None:
                     start_message = messages.StartedMessage.get(
                         output_dir=runtime_task.task.runnable.output_dir,
