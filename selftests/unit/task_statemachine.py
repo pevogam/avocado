@@ -96,6 +96,67 @@ class WorkerTerminalStatus(IsolatedAsyncioTestCase):
             ["started", "running", "finished"],
         )
 
+    async def test_finished_message_wins_timeout_race(self):
+        runtime_task, status_repo, state_machine = make_started_state()
+
+        async def finish_then_timeout(_task_id, _timeout):
+            status_repo.process_message(
+                {
+                    "id": "1-noop",
+                    "job_id": JOB_ID,
+                    "status": "finished",
+                    "result": "pass",
+                    "time": 1.0,
+                }
+            )
+            raise asyncio.TimeoutError
+
+        status_repo.wait_for_task_finished = finish_then_timeout
+        worker = Worker(state_machine, FakeSpawner(), terminal_message_timeout=0.01)
+
+        await asyncio.wait_for(worker.monitor(), 0.5)
+
+        self.assertEqual(runtime_task.result, "pass")
+        self.assertEqual(state_machine.finished, [runtime_task])
+        self.assertEqual(
+            [item["status"] for item in status_repo.get_all_task_data("1-noop")],
+            ["finished"],
+        )
+
+    async def test_finished_message_wins_while_timeout_waits_for_lock(self):
+        runtime_task, status_repo, state_machine = make_started_state()
+        state_machine.started.remove(runtime_task)
+        state_machine.monitored.append(runtime_task)
+
+        async def timeout(_task_id, _timeout):
+            raise asyncio.TimeoutError
+
+        status_repo.wait_for_task_finished = timeout
+        worker = Worker(state_machine, FakeSpawner(), terminal_message_timeout=0.01)
+
+        async with state_machine.lock:
+            terminal_data_task = asyncio.create_task(
+                worker._get_terminal_task_data(runtime_task)
+            )
+            await asyncio.sleep(0)
+            status_repo.process_message(
+                {
+                    "id": "1-noop",
+                    "job_id": JOB_ID,
+                    "status": "finished",
+                    "result": "pass",
+                    "time": 1.0,
+                }
+            )
+
+        terminal_data = await asyncio.wait_for(terminal_data_task, 0.5)
+
+        self.assertEqual(terminal_data["result"], "pass")
+        self.assertEqual(
+            [item["status"] for item in status_repo.get_all_task_data("1-noop")],
+            ["finished"],
+        )
+
     async def test_termination_owns_task_during_terminal_grace(self):
         runtime_task, status_repo, state_machine = make_started_state()
         spawner = FakeSpawner()
