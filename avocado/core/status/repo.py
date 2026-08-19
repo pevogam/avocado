@@ -168,17 +168,27 @@ class StatusRepo:
         task_id = message.get("id")
         status = message.get("status")
         time = message.get("time")
+        # A type-less running message is a runner heartbeat.  It updates the
+        # repository status and remains available in the task history for
+        # diagnostics, but MessageHandler has nothing to present for it.
+        # Keeping heartbeats out of the presentation journal prevents a fast
+        # or stale runner from flooding the synchronous status updater.
+        is_heartbeat = status == "running" and message.get("type") is None
         if not all((task_id, status, time)):
             return
         if task_id not in self._status:
             self._status[task_id] = (status, time)
-            heapq.heappush(self._status_journal_summary, (time, task_id, status, 0))
+            if not is_heartbeat:
+                heapq.heappush(self._status_journal_summary, (time, task_id, status, 0))
         else:
             current_status, _ = self._status[task_id]
             if current_status == "finished":
-                LOG.warning(
-                    "Received a %s message after finished message: %s", status, message
-                )
+                if not is_heartbeat:
+                    LOG.warning(
+                        "Received a %s message after finished message: %s",
+                        status,
+                        message,
+                    )
             elif status == "started":
                 LOG.warning(
                     "Received a started message when the status is already %s: %s",
@@ -187,8 +197,11 @@ class StatusRepo:
                 )
             else:
                 self._status[task_id] = (status, time)
-            index = len(self.get_all_task_data(task_id))
-            heapq.heappush(self._status_journal_summary, (time, task_id, status, index))
+            if not is_heartbeat:
+                index = len(self.get_all_task_data(task_id))
+                heapq.heappush(
+                    self._status_journal_summary, (time, task_id, status, index)
+                )
 
     def process_message(self, message):
         for required_field in ("id", "job_id"):
