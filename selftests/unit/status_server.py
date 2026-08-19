@@ -45,6 +45,55 @@ class StatusServerTest(unittest.IsolatedAsyncioTestCase):
             [call(first), call(second)],
         )
 
+    async def test_buffered_records_yield_between_bounded_batches(self):
+        messages = [
+            b'{"status": "running", "sequence": 1}\n',
+            b'{"status": "running", "sequence": 2}\n',
+            b'{"status": "finished", "sequence": 3}\n',
+        ]
+        reader = Mock()
+        reader.readline = AsyncMock(side_effect=[*messages, b""])
+        self.server._RECORDS_PER_EVENT_LOOP_TURN = 2
+        processed_before_observer = []
+
+        async def observe_batch_boundary():
+            processed_before_observer.append(self.repo.process_raw_message.call_count)
+
+        observer = asyncio.create_task(observe_batch_boundary())
+        await self.server.cb(reader, self.writer)
+        await observer
+
+        self.assertEqual(processed_before_observer, [2])
+        self.assertEqual(
+            self.repo.process_raw_message.call_args_list,
+            [call(message) for message in messages],
+        )
+
+    async def test_oversized_records_count_toward_batch_limit(self):
+        finished = b'{"status": "finished"}\n'
+        reader = Mock()
+        reader.readline = AsyncMock(
+            side_effect=[
+                ValueError("oversized"),
+                ValueError("oversized"),
+                finished,
+                b"",
+            ]
+        )
+        self.server._RECORDS_PER_EVENT_LOOP_TURN = 2
+        processed_before_observer = []
+
+        async def observe_batch_boundary():
+            processed_before_observer.append(self.repo.process_raw_message.call_count)
+
+        observer = asyncio.create_task(observe_batch_boundary())
+        with self.assertLogs("avocado.core.status.server", level="ERROR"):
+            await self.server.cb(reader, self.writer)
+        await observer
+
+        self.assertEqual(processed_before_observer, [0])
+        self.repo.process_raw_message.assert_called_once_with(finished)
+
     async def test_repo_error_does_not_discard_following_message(self):
         first = b'{"status": "started"}\n'
         second = b'{"status": "finished"}\n'
