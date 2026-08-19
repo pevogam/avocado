@@ -163,6 +163,11 @@ class StatusRepo:
     def status_journal_summary_pop(self):
         return heapq.heappop(self._status_journal_summary)
 
+    @property
+    def status_journal_size(self):
+        """Number of messages waiting for presentation-side handling."""
+        return len(self._status_journal_summary)
+
     def _update_status(self, message):
         """Update the latest status of a task (by message)."""
         task_id = message.get("id")
