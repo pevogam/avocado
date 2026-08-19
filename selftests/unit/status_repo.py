@@ -226,6 +226,7 @@ class StatusRepo(TestCase):
         msg = {
             "id": "1-foo",
             "status": "running",
+            "type": "log",
             "time": 1000000003.0,
             "job_id": "0000000000000000000000000000000000000000",
         }
@@ -233,6 +234,7 @@ class StatusRepo(TestCase):
         msg = {
             "id": "1-foo",
             "status": "running",
+            "type": "log",
             "time": 1000000002.0,
             "job_id": "0000000000000000000000000000000000000000",
         }
@@ -269,6 +271,52 @@ class StatusRepo(TestCase):
         self.assertEqual(
             self.status_repo.status_journal_summary_pop(),
             (1000000004.0, "1-foo", "finished", 3),
+        )
+        with self.assertRaises(IndexError):
+            self.status_repo.status_journal_summary_pop()
+
+    def test_heartbeat_does_not_enter_presentation_journal(self):
+        msg = {
+            "id": "1-foo",
+            "status": "running",
+            "time": 1000000001.0,
+            "child_pid": 123,
+            "queue_messages_received": 10,
+            "job_id": "0000000000000000000000000000000000000000",
+        }
+
+        self.status_repo.process_message(msg)
+
+        self.assertEqual(self.status_repo.get_task_status("1-foo"), "running")
+        self.assertEqual(
+            self.status_repo.get_latest_task_data("1-foo")["child_pid"], 123
+        )
+        with self.assertRaises(IndexError):
+            self.status_repo.status_journal_summary_pop()
+
+    def test_late_heartbeat_does_not_emit_warning_or_enter_journal(self):
+        finished = {
+            "id": "1-foo",
+            "status": "finished",
+            "result": "pass",
+            "time": 1000000001.0,
+            "job_id": "0000000000000000000000000000000000000000",
+        }
+        heartbeat = {
+            "id": "1-foo",
+            "status": "running",
+            "time": 1000000002.0,
+            "job_id": "0000000000000000000000000000000000000000",
+        }
+        self.status_repo.process_message(finished)
+        self.status_repo.status_journal_summary_pop()
+
+        with self.assertNoLogs("avocado.core.status.repo", level="WARNING"):
+            self.status_repo.process_message(heartbeat)
+
+        self.assertEqual(self.status_repo.get_task_status("1-foo"), "finished")
+        self.assertEqual(
+            self.status_repo.get_latest_task_data("1-foo")["status"], "running"
         )
         with self.assertRaises(IndexError):
             self.status_repo.status_journal_summary_pop()
