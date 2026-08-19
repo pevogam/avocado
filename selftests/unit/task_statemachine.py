@@ -96,6 +96,71 @@ class WorkerTerminalStatus(IsolatedAsyncioTestCase):
             ["started", "running", "finished"],
         )
 
+    async def test_missing_finished_includes_runner_diagnostics(self):
+        runtime_task, status_repo, state_machine = make_started_state()
+        status_repo.process_message(
+            {
+                "id": "1-noop",
+                "job_id": JOB_ID,
+                "status": "running",
+                "time": 1.0,
+                "child_pid": 123,
+                "queue_messages_received": 20,
+                "queue_messages_forwarded": 19,
+                "queue_writer_blocked_seconds": 6.5,
+            }
+        )
+        runtime_task.spawner_diagnostics = {
+            "spawner": "lxc",
+            "container_id": "c5",
+            "runner_exit_code": 0,
+            "runner_stderr_tail": "status connection lost",
+        }
+        worker = Worker(state_machine, FakeSpawner(), terminal_message_timeout=0.01)
+
+        with self.assertLogs("avocado.core.task.statemachine", level="ERROR") as logs:
+            await asyncio.wait_for(worker.monitor(), 0.5)
+
+        finished_data = status_repo.get_finished_task_data("1-noop")
+        self.assertEqual(
+            finished_data["last_runner_heartbeat"],
+            {
+                "time": 1.0,
+                "child_pid": 123,
+                "queue_messages_received": 20,
+                "queue_messages_forwarded": 19,
+                "queue_writer_blocked_seconds": 6.5,
+            },
+        )
+        self.assertEqual(
+            finished_data["spawner_diagnostics"]["runner_stderr_tail"],
+            "status connection lost",
+        )
+        self.assertIn("status connection lost", logs.output[0])
+        self.assertIsNone(runtime_task.spawner_diagnostics)
+
+    async def test_normal_finished_message_discards_spawner_diagnostics(self):
+        runtime_task, status_repo, state_machine = make_started_state()
+        status_repo.process_message(
+            {
+                "id": "1-noop",
+                "job_id": JOB_ID,
+                "status": "finished",
+                "result": "pass",
+                "time": 1.0,
+            }
+        )
+        runtime_task.spawner_diagnostics = {"runner_stderr_tail": "unused"}
+        worker = Worker(state_machine, FakeSpawner(), terminal_message_timeout=0.01)
+
+        await asyncio.wait_for(worker.monitor(), 0.5)
+
+        self.assertIsNone(runtime_task.spawner_diagnostics)
+        self.assertNotIn(
+            "spawner_diagnostics",
+            status_repo.get_finished_task_data("1-noop"),
+        )
+
     async def test_finished_message_wins_timeout_race(self):
         runtime_task, status_repo, state_machine = make_started_state()
 
