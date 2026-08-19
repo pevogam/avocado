@@ -288,14 +288,35 @@ class Worker:
                     return finished_data
 
                 task_data = status_repo.get_all_task_data(task_id) or []
+                recent_event_fields = (
+                    "status",
+                    "type",
+                    "time",
+                    "result",
+                    "child_pid",
+                    "queue_messages_received",
+                    "queue_messages_forwarded",
+                    "queue_writer_locked",
+                    "queue_writer_blocked_seconds",
+                )
                 recent_events = [
-                    {
-                        key: event.get(key)
-                        for key in ("status", "type", "time", "result")
-                        if key in event
-                    }
+                    {key: event.get(key) for key in recent_event_fields if key in event}
                     for event in task_data[-10:]
                 ]
+                heartbeat_fields = recent_event_fields[4:]
+                last_runner_heartbeat = next(
+                    (
+                        {
+                            key: event.get(key)
+                            for key in ("time", *heartbeat_fields)
+                            if key in event
+                        }
+                        for event in reversed(task_data)
+                        if any(key in event for key in heartbeat_fields)
+                    ),
+                    None,
+                )
+                spawner_diagnostics = runtime_task.spawner_diagnostics
                 reason = (
                     "Task runner exited without sending a finished status message "
                     f"within {self._terminal_message_timeout:g} seconds"
@@ -316,6 +337,8 @@ class Worker:
                     repository_status=repository_status,
                     status_event_count=len(task_data),
                     recent_status_events=recent_events,
+                    last_runner_heartbeat=last_runner_heartbeat,
+                    spawner_diagnostics=spawner_diagnostics,
                 )
                 if status_repo.get_task_status(task_id) is None:
                     start_message = messages.StartedMessage.get(
@@ -328,12 +351,15 @@ class Worker:
                 status_repo.process_message(finish_message)
             LOG.error(
                 'Task "%s": %s (repository status=%r, event count=%d, '
-                "recent events=%r)",
+                "recent events=%r, last runner heartbeat=%r, "
+                "spawner diagnostics=%r)",
                 task_id,
                 reason,
                 repository_status,
                 len(task_data),
                 recent_events,
+                last_runner_heartbeat,
+                spawner_diagnostics,
             )
             return status_repo.get_finished_task_data(task_id)
 
@@ -543,6 +569,10 @@ class Worker:
         # result.  If the runner exited without sending one, bound the grace
         # period and turn that runner protocol failure into a clear ERROR.
         latest_task_data = await self._get_terminal_task_data(runtime_task)
+        # Spawner output tails are retained solely for terminal-loss
+        # diagnostics.  Do not keep them for every completed task until the
+        # entire job object is released.
+        runtime_task.spawner_diagnostics = None
         if latest_task_data is None:
             # A terminating worker took ownership while terminal status was
             # being reconciled.
