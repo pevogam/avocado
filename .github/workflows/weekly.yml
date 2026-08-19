@@ -8,6 +8,9 @@ on:
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
 
+env:
+  SKIP: no-commit-to-branch
+
 jobs:
 
   latest-python:
@@ -89,7 +92,9 @@ jobs:
       - name: Install static check dependencies
         run: make requirements-static-checks
       - name: Installing Avocado in develop mode
-        run: python3 setup.py develop --user --skip-optional-plugins --skip-examples-plugins-tests
+        run: |
+          python3 -m pip install --user --upgrade "setuptools<80"
+          python3 setup.py develop --user --skip-optional-plugins --skip-examples-plugins-tests
       - name: Avocado version
         run: avocado --version
       - name: Tree static check, unittests and fast functional tests without plugins

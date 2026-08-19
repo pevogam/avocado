@@ -6,6 +6,9 @@ on:
     - cron: "0 5 * * 1"
   workflow_dispatch:
 
+env:
+  SKIP: no-commit-to-branch
+
 jobs:
 
   make-check:
@@ -50,6 +53,7 @@ jobs:
       - name: Install avocado
         run: |
           pip install -r requirements-dev.txt
+          python3 -m pip install --user --upgrade "setuptools<80"
           python3 setup.py develop --user
       - name: Avocado pre-release job
         run: python3 setup.py test --select=pre-release
@@ -108,6 +112,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v7
+    - name: Set weekly TestPyPI version
+      run: |
+        version="$(cat VERSION).dev${{ github.run_number }}"
+        make -f Makefile.gh propagate-version VERSION="$version"
     - name: Build tarballs and wheels
       run: make -f Makefile.gh build-wheel check-wheel
     - name: Save tarballs and wheels as artifacts
