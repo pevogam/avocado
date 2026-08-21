@@ -485,4 +485,21 @@ def find_avocado_tests(path):
 
 def find_python_unittests(path):
     found, _ = find_python_tests("unittest", "TestCase", _determine_match_python, path)
-    return found
+    isolated_asyncio, _ = find_python_tests(
+        "unittest", "IsolatedAsyncioTestCase", _determine_match_python, path
+    )
+    for klass, methods in isolated_asyncio.items():
+        if klass in found:
+            _extend_test_list(found[klass], methods)
+        else:
+            found[klass] = methods
+
+    # Both discovery passes preserve source order independently.  Rebuild the
+    # combined result in source order so mixing synchronous and isolated
+    # asyncio test classes does not reorder their execution.
+    module = PythonModule(path, "unittest", "TestCase")
+    return collections.OrderedDict(
+        (klass.name, found[klass.name])
+        for klass in module.iter_classes()
+        if klass.name in found
+    )
