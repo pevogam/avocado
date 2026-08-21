@@ -15,7 +15,7 @@ LOG = logging.getLogger(__name__)
 # A runner process normally sends its finished message before exiting.  Allow
 # the status server a small delivery grace period, but never let a missing
 # terminal message stall the state machine indefinitely.
-DEFAULT_TERMINAL_MESSAGE_TIMEOUT = 30.0
+DEFAULT_TERMINAL_MESSAGE_TIMEOUT = 300.0
 
 
 class TaskStateMachine:
