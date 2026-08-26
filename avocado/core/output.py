@@ -420,13 +420,23 @@ def del_last_configuration():
     if len(CONFIG) == 1:
         return
     configuration = CONFIG.pop()
-    for logger_name in configuration:
-        disable_log_handler(logger_name)
+    for logger_name, handlers in configuration.items():
+        logger = logging.getLogger(logger_name)
+        for handler in handlers:
+            logger.removeHandler(handler)
+            # MemoryHandler.close() flushes its buffered records to the target
+            # but does not close that target.  Retain it before close() clears
+            # the reference so both layers release their resources.
+            target = getattr(handler, "target", None)
+            handler.close()
+            if target is not None:
+                target.close()
     configuration = CONFIG[-1]
     for logger_name, handlers in configuration.items():
         logger = logging.getLogger(logger_name)
         for handler in handlers:
-            logger.addHandler(handler)
+            if handler not in logger.handlers:
+                logger.addHandler(handler)
 
 
 def split_loggers_and_levels(loggers):
