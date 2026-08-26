@@ -34,6 +34,7 @@ from avocado.core.status.repo import StatusRepo
 from avocado.core.status.server import StatusServer
 from avocado.core.task.runtime import RuntimeTaskGraph
 from avocado.core.task.statemachine import (
+    DEFAULT_SPAWNER_EXIT_TIMEOUT,
     DEFAULT_TERMINAL_MESSAGE_TIMEOUT,
     TaskStateMachine,
     Worker,
@@ -155,6 +156,19 @@ class RunnerInit(Init):
             section="task.timeout",
             key="finished_status",
             default=DEFAULT_TERMINAL_MESSAGE_TIMEOUT,
+            key_type=float,
+            help_msg=help_msg,
+        )
+
+        help_msg = (
+            "Seconds to wait for a spawner wrapper to exit after the runner has "
+            "already delivered a finished status. A wrapper that outlives this "
+            "grace period is cancelled and the terminal result is reconciled."
+        )
+        settings.register_option(
+            section="task.timeout",
+            key="spawner_exit",
+            default=DEFAULT_SPAWNER_EXIT_TIMEOUT,
             key_type=float,
             help_msg=help_msg,
         )
@@ -376,6 +390,9 @@ class Runner(SuiteRunner):
         terminal_message_timeout = test_suite.config.get(
             "task.timeout.finished_status", DEFAULT_TERMINAL_MESSAGE_TIMEOUT
         )
+        spawner_exit_timeout = test_suite.config.get(
+            "task.timeout.spawner_exit", DEFAULT_SPAWNER_EXIT_TIMEOUT
+        )
         failfast = test_suite.config.get("run.failfast")
         workers = [
             Worker(
@@ -385,6 +402,7 @@ class Runner(SuiteRunner):
                 task_timeout=timeout,
                 failfast=failfast,
                 terminal_message_timeout=terminal_message_timeout,
+                spawner_exit_timeout=spawner_exit_timeout,
             ).run()
             for _ in range(max_running)
         ]
@@ -406,6 +424,7 @@ class Runner(SuiteRunner):
                     task_timeout=timeout,
                     failfast=failfast,
                     terminal_message_timeout=terminal_message_timeout,
+                    spawner_exit_timeout=spawner_exit_timeout,
                 )
                 loop.run_until_complete(
                     asyncio.wait_for(terminate_worker.terminate_tasks_timeout(), None)
@@ -419,6 +438,7 @@ class Runner(SuiteRunner):
                     task_timeout=timeout,
                     failfast=failfast,
                     terminal_message_timeout=terminal_message_timeout,
+                    spawner_exit_timeout=spawner_exit_timeout,
                 )
                 loop.run_until_complete(
                     asyncio.wait_for(
