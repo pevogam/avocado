@@ -21,7 +21,8 @@ Utility Modules
 Bug Fixes
 =========
 
-*
+* The Podman spawner now resolves the default ``podman`` binary through
+  ``PATH``, supporting installations outside ``/usr/bin``.
 
 Internal changes
 ================
