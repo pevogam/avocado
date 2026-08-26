@@ -16,12 +16,17 @@ LOG = logging.getLogger(__name__)
 # the status server a small delivery grace period, but never let a missing
 # terminal message stall the state machine indefinitely.
 DEFAULT_TERMINAL_MESSAGE_TIMEOUT = 300.0
+# A finished message is emitted before the task runner finishes its own
+# teardown.  That teardown should be short; a longer delay points at a stuck
+# spawner wrapper rather than a still-running test.
+DEFAULT_SPAWNER_EXIT_TIMEOUT = 30.0
 
 
 class TaskStateMachine:
     """Represents all phases that a task can go through its life."""
 
     def __init__(self, tasks, status_repo):
+        tasks = list(tasks)
         self._requested = collections.deque(tasks)
         self._status_repo = status_repo
         self._triaging = []
@@ -32,6 +37,9 @@ class TaskStateMachine:
         self._lock = asyncio.Lock()
         self._cache_lock = asyncio.Lock()
         self._task_size = len(tasks)
+        self._task_identifier_counts = collections.Counter(
+            str(runtime_task.task.identifier) for runtime_task in tasks
+        )
 
         self._tasks_by_id = {
             str(runtime_task.task.identifier): runtime_task.task
@@ -84,10 +92,17 @@ class TaskStateMachine:
     def tasks_by_id(self):
         return self._tasks_by_id
 
+    def is_task_identifier_unique(self, runtime_task):
+        """Return whether terminal status can identify this runtime task."""
+        task_id = str(runtime_task.task.identifier)
+        return self._task_identifier_counts[task_id] == 1
+
     async def add_new_task(self, runtime_task):
         async with self.lock:
             self._requested.appendleft(runtime_task)
-            self._tasks_by_id[str(runtime_task.task.identifier)] = runtime_task.task
+            task_id = str(runtime_task.task.identifier)
+            self._tasks_by_id[task_id] = runtime_task.task
+            self._task_identifier_counts[task_id] += 1
         return
 
     async def abort(self, status_reason=None):
@@ -188,6 +203,7 @@ class Worker:
         task_timeout=None,
         failfast=False,
         terminal_message_timeout=DEFAULT_TERMINAL_MESSAGE_TIMEOUT,
+        spawner_exit_timeout=DEFAULT_SPAWNER_EXIT_TIMEOUT,
     ):
         self._state_machine = state_machine
         self._spawner = spawner
@@ -204,12 +220,18 @@ class Worker:
         if terminal_message_timeout < 0:
             raise ValueError("terminal_message_timeout must not be negative")
         self._terminal_message_timeout = terminal_message_timeout
+        if spawner_exit_timeout is None:
+            spawner_exit_timeout = DEFAULT_SPAWNER_EXIT_TIMEOUT
+        if spawner_exit_timeout < 0:
+            raise ValueError("spawner_exit_timeout must not be negative")
+        self._spawner_exit_timeout = spawner_exit_timeout
         LOG.debug("%s has been initialized", self)
 
     def __repr__(self):
         fmt = (
             '<Worker spawner="{}" max_triaging={} max_running={} '
-            "task_timeout={} terminal_message_timeout={}>"
+            "task_timeout={} terminal_message_timeout={} "
+            "spawner_exit_timeout={}>"
         )
         return fmt.format(
             self._spawner,
@@ -217,6 +239,7 @@ class Worker:
             self._max_running,
             self._task_timeout,
             self._terminal_message_timeout,
+            self._spawner_exit_timeout,
         )
 
     async def _send_finished_tasks_message(self, terminate_tasks, reason):
@@ -489,6 +512,143 @@ class Worker:
         async with self._state_machine.lock:
             self._state_machine.ready.append(runtime_task)
 
+    async def _cancel_spawn_task(self, spawn_task, runtime_task):
+        """Cancel a spawner operation without waiting forever for cleanup."""
+        if not spawn_task.done():
+            spawn_task.cancel()
+        done, _ = await asyncio.wait((spawn_task,), timeout=self._spawner_exit_timeout)
+        if done:
+            # Consume cancellation or a cleanup exception so it is not reported
+            # later as an unhandled task exception.
+            await asyncio.gather(*done, return_exceptions=True)
+            return
+
+        LOG.error(
+            'Task "%s": spawner ignored cancellation for another %g seconds; '
+            "leaving its cleanup task detached",
+            runtime_task.task.identifier,
+            self._spawner_exit_timeout,
+        )
+
+        def consume_exception(task):
+            if not task.cancelled():
+                task.exception()
+
+        spawn_task.add_done_callback(consume_exception)
+
+    async def _spawn_task(self, runtime_task):
+        """Wait for spawning, a terminal status, or the execution deadline.
+
+        Some spawners run the task command synchronously and only return after
+        it exits.  A terminal status therefore proves that spawning succeeded,
+        even if a wrapper remains stuck after the actual runner has finished.
+
+        :returns: ``True`` or ``False`` for the spawner result, or ``None``
+                  when a spawn-phase execution timeout finalized the task.
+        """
+        task_id = str(runtime_task.task.identifier)
+        status_repo = self._state_machine._status_repo
+        spawn_task = asyncio.create_task(self._spawner.spawn_task(runtime_task))
+        terminal_task = None
+        wait_tasks = {spawn_task}
+        if self._state_machine.is_task_identifier_unique(runtime_task):
+            terminal_task = asyncio.create_task(
+                status_repo.wait_for_task_finished(task_id, None)
+            )
+            wait_tasks.add(terminal_task)
+        else:
+            LOG.warning(
+                'Task "%s": terminal-status spawn shortcut disabled because '
+                "the identifier is not unique within the job",
+                task_id,
+            )
+        timeout = None
+        if runtime_task.execution_timeout is not None:
+            timeout = max(0, runtime_task.execution_timeout - time.monotonic())
+
+        try:
+            done, _ = await asyncio.wait(
+                wait_tasks,
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            if spawn_task in done:
+                return await spawn_task
+
+            if terminal_task is not None and terminal_task in done:
+                # Consume and validate the waiter result before giving the
+                # wrapper a short opportunity to finish its normal teardown.
+                terminal_data = await terminal_task
+                wrapper_done, _ = await asyncio.wait(
+                    (spawn_task,), timeout=self._spawner_exit_timeout
+                )
+                if wrapper_done:
+                    try:
+                        spawn_result = await spawn_task
+                    except Exception:  # pylint: disable=W0718
+                        LOG.exception(
+                            'Task "%s": spawner failed after terminal status %r',
+                            runtime_task.task.identifier,
+                            terminal_data.get("result"),
+                        )
+                        return True
+                    if not spawn_result:
+                        LOG.warning(
+                            'Task "%s": spawner reported failure after terminal '
+                            "status %r; treating the delivered status as authoritative",
+                            runtime_task.task.identifier,
+                            terminal_data.get("result"),
+                        )
+                    return True
+
+                diagnostics = dict(runtime_task.spawner_diagnostics or {})
+                diagnostics.update(
+                    {
+                        "terminal_status_received": True,
+                        "terminal_result": terminal_data.get("result"),
+                        "spawner_exit_timeout": self._spawner_exit_timeout,
+                    }
+                )
+                runtime_task.spawner_diagnostics = diagnostics
+                LOG.error(
+                    'Task "%s": terminal status %r was received, but the spawner '
+                    "did not return within %g seconds; cancelling the stuck "
+                    "wrapper",
+                    runtime_task.task.identifier,
+                    terminal_data.get("result"),
+                    self._spawner_exit_timeout,
+                )
+                await self._cancel_spawn_task(spawn_task, runtime_task)
+                return True
+
+            LOG.error(
+                'Task "%s": spawner did not return before the %g-second task '
+                "execution timeout",
+                runtime_task.task.identifier,
+                self._task_timeout,
+            )
+            await self._cancel_spawn_task(spawn_task, runtime_task)
+            await self._terminate_task(runtime_task, RuntimeTaskStatus.TIMEOUT)
+            await self._send_finished_tasks_message(
+                [runtime_task], "Timeout reached while spawning task"
+            )
+            terminal_data = status_repo.get_finished_task_data(task_id)
+            if terminal_data is not None:
+                runtime_task.result = terminal_data["result"]
+            await self._state_machine.finish_task(
+                runtime_task, RuntimeTaskStatus.TIMEOUT
+            )
+            return None
+        except asyncio.CancelledError:
+            await self._cancel_spawn_task(spawn_task, runtime_task)
+            raise
+        finally:
+            if terminal_task is not None:
+                if not terminal_task.done():
+                    terminal_task.cancel()
+                await asyncio.gather(terminal_task, return_exceptions=True)
+
     async def start(self):
         """Reads from ready, moves into either: started or finished."""
         try:
@@ -516,12 +676,16 @@ class Worker:
             runtime_task.task.identifier,
             self._spawner,
         )
-        start_ok = await self._spawner.spawn_task(runtime_task)
+        if self._task_timeout is not None:
+            # Include spawning in the execution deadline.  Container spawners
+            # can otherwise block before monitor() installs the timeout.
+            runtime_task.execution_timeout = time.monotonic() + self._task_timeout
+        start_ok = await self._spawn_task(runtime_task)
+        if start_ok is None:
+            return
         if start_ok:
             LOG.debug('Task "%s": spawned successfully', runtime_task.task.identifier)
             runtime_task.status = RuntimeTaskStatus.STARTED
-            if self._task_timeout is not None:
-                runtime_task.execution_timeout = time.monotonic() + self._task_timeout
             async with self._state_machine.lock:
                 self._state_machine.started.append(runtime_task)
         else:
@@ -542,7 +706,18 @@ class Worker:
             # finished message.
             self._state_machine.monitored.append(runtime_task)
 
-        if self._spawner.is_task_alive(runtime_task):
+        terminal_data = None
+        if self._state_machine.is_task_identifier_unique(runtime_task):
+            terminal_data = self._state_machine._status_repo.get_finished_task_data(
+                str(runtime_task.task.identifier)
+            )
+        if terminal_data is not None:
+            LOG.debug(
+                'Task "%s" reached monitor phase with terminal status already '
+                "available",
+                runtime_task.task.identifier,
+            )
+        elif self._spawner.is_task_alive(runtime_task):
             LOG.debug(
                 'Task "%s" is alive at monitor phase', runtime_task.task.identifier
             )
@@ -568,7 +743,9 @@ class Worker:
         # A late running/log message must not obscure an earlier terminal
         # result.  If the runner exited without sending one, bound the grace
         # period and turn that runner protocol failure into a clear ERROR.
-        latest_task_data = await self._get_terminal_task_data(runtime_task)
+        latest_task_data = terminal_data or await self._get_terminal_task_data(
+            runtime_task
+        )
         # Spawner output tails are retained solely for terminal-loss
         # diagnostics.  Do not keep them for every completed task until the
         # entire job object is released.
