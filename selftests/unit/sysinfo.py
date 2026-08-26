@@ -3,6 +3,8 @@ import tempfile
 import unittest
 
 from avocado.core import sysinfo
+from avocado.core.nrunner.runnable import Runnable
+from avocado.plugins.sysinfo import SysInfoTest as SysInfoPlugin
 from avocado.utils import sysinfo as sysinfo_collectible
 from selftests.utils import temp_dir_prefix
 
@@ -49,6 +51,23 @@ class SysinfoTest(unittest.TestCase):
         container.add(file4)
 
         self.assertEqual(len(container), 5)
+
+    def test_conditional_post_runnables_have_unique_names(self):
+        config = {
+            "sysinfo.collect.enabled": True,
+            "sysinfo.collect.per_test": True,
+            "sysinfo.collectibles.commands": "/does/not/exist/commands",
+            "sysinfo.collectibles.files": "/does/not/exist/files",
+            "sysinfo.collectibles.fail_commands": "/does/not/exist/fail_commands",
+            "sysinfo.collectibles.fail_files": "/does/not/exist/fail_files",
+        }
+        test_runnable = Runnable("noop", "noop", output_dir=self.tmpdir.name)
+
+        post_runnables = SysInfoPlugin().post_test_runnables(test_runnable, config)
+        names = [runnable.kwargs["name"] for runnable, _ in post_runnables]
+
+        self.assertEqual(names, ["post-pass", "post-fail"])
+        self.assertEqual(len(names), len(set(names)))
 
     def test_logger_job(self):
         jobdir = os.path.join(self.tmpdir.name, "job")

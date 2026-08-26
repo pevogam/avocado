@@ -5,8 +5,9 @@ from avocado.core.exceptions import JobFailFast
 from avocado.core.nrunner.runnable import Runnable
 from avocado.core.nrunner.task import Task
 from avocado.core.status.repo import StatusRepo
-from avocado.core.task.runtime import RuntimeTask
+from avocado.core.task.runtime import RuntimeTask, RuntimeTaskStatus
 from avocado.core.task.statemachine import TaskStateMachine, Worker
+from avocado.core.test_id import TestID
 
 JOB_ID = "0000000000000000000000000000000000000000"
 
@@ -33,6 +34,42 @@ class FakeSpawner:
         return True
 
 
+class BlockingSpawner(FakeSpawner):
+    def __init__(self):
+        super().__init__()
+        self.spawn_started = asyncio.Event()
+        self.spawn_cancelled = asyncio.Event()
+
+    async def spawn_task(self, _runtime_task):
+        self.spawn_started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            self.spawn_cancelled.set()
+            raise
+
+
+class ControlledSpawner(FakeSpawner):
+    def __init__(self):
+        super().__init__(alive=True)
+        self.spawn_started = asyncio.Event()
+        self.spawn_release = asyncio.Event()
+        self.spawn_cancelled = asyncio.Event()
+        self.wait_called = False
+
+    async def spawn_task(self, _runtime_task):
+        self.spawn_started.set()
+        try:
+            await self.spawn_release.wait()
+        except asyncio.CancelledError:
+            self.spawn_cancelled.set()
+            raise
+        return True
+
+    async def wait_task(self, _runtime_task):
+        self.wait_called = True
+
+
 def make_started_state():
     runnable = Runnable("noop", "noop")
     task = Task(runnable, identifier="1-noop", job_id=JOB_ID)
@@ -43,6 +80,113 @@ def make_started_state():
     state_machine.requested.clear()
     state_machine.started.append(runtime_task)
     return runtime_task, status_repo, state_machine
+
+
+def make_ready_state():
+    runtime_task, status_repo, state_machine = make_started_state()
+    state_machine.started.clear()
+    state_machine.ready.append(runtime_task)
+    return runtime_task, status_repo, state_machine
+
+
+class WorkerSpawnStatus(IsolatedAsyncioTestCase):
+    async def test_duplicate_identifier_does_not_reuse_terminal_status(self):
+        first_id = TestID(1, "noop")
+        second_id = TestID(1, "noop")
+        runtime_task = RuntimeTask(
+            Task(Runnable("noop", "noop"), identifier=first_id, job_id=JOB_ID)
+        )
+        duplicate = RuntimeTask(
+            Task(Runnable("noop", "noop"), identifier=second_id, job_id=JOB_ID)
+        )
+        status_repo = StatusRepo(JOB_ID)
+        state_machine = TaskStateMachine([runtime_task, duplicate], status_repo)
+        state_machine.requested.clear()
+        state_machine.ready.append(runtime_task)
+        status_repo.process_message(
+            {
+                "id": str(first_id),
+                "job_id": JOB_ID,
+                "status": "finished",
+                "result": "skip",
+                "time": 1.0,
+            }
+        )
+        spawner = ControlledSpawner()
+        worker = Worker(state_machine, spawner, spawner_exit_timeout=0.01)
+
+        with self.assertLogs("avocado.core.task.statemachine", level="WARNING"):
+            start_task = asyncio.create_task(worker.start())
+            await asyncio.wait_for(spawner.spawn_started.wait(), 0.5)
+            await asyncio.sleep(0.02)
+            self.assertFalse(start_task.done())
+            self.assertFalse(spawner.spawn_cancelled.is_set())
+            spawner.spawn_release.set()
+            await asyncio.wait_for(start_task, 0.5)
+
+        await asyncio.wait_for(worker.monitor(), 0.5)
+
+        self.assertTrue(spawner.wait_called)
+        self.assertEqual(state_machine.finished, [runtime_task])
+
+    async def test_terminal_status_cancels_stuck_spawner_wrapper(self):
+        runtime_task, status_repo, state_machine = make_ready_state()
+        spawner = BlockingSpawner()
+        worker = Worker(
+            state_machine,
+            spawner,
+            spawner_exit_timeout=0.01,
+            terminal_message_timeout=0.01,
+        )
+
+        with self.assertLogs("avocado.core.task.statemachine", level="ERROR") as logs:
+            start_task = asyncio.create_task(worker.start())
+            await asyncio.wait_for(spawner.spawn_started.wait(), 0.5)
+            status_repo.process_message(
+                {
+                    "id": "1-noop",
+                    "job_id": JOB_ID,
+                    "status": "finished",
+                    "result": "pass",
+                    "time": 1.0,
+                }
+            )
+            await asyncio.wait_for(start_task, 0.5)
+
+        self.assertTrue(spawner.spawn_cancelled.is_set())
+        self.assertIn("terminal status 'pass' was received", logs.output[0])
+        self.assertEqual(state_machine.started, [runtime_task])
+
+        await asyncio.wait_for(worker.monitor(), 0.5)
+
+        self.assertEqual(runtime_task.result, "pass")
+        self.assertEqual(state_machine.finished, [runtime_task])
+        self.assertEqual(state_machine.monitored, [])
+
+    async def test_task_timeout_also_bounds_spawning(self):
+        runtime_task, status_repo, state_machine = make_ready_state()
+        spawner = BlockingSpawner()
+        worker = Worker(
+            state_machine,
+            spawner,
+            task_timeout=0.01,
+            spawner_exit_timeout=0.01,
+        )
+
+        with self.assertLogs("avocado.core.task.statemachine", level="ERROR") as logs:
+            await asyncio.wait_for(worker.start(), 0.5)
+
+        self.assertTrue(spawner.spawn_cancelled.is_set())
+        self.assertEqual(spawner.terminated, [runtime_task])
+        self.assertIn("task execution timeout", logs.output[0])
+        self.assertEqual(runtime_task.result, "interrupted")
+        self.assertEqual(runtime_task.status, RuntimeTaskStatus.TIMEOUT)
+        self.assertEqual(state_machine.started, [])
+        self.assertEqual(state_machine.finished, [runtime_task])
+        self.assertEqual(
+            status_repo.get_finished_task_data("1-noop")["fail_reason"],
+            "Test interrupted: Timeout reached while spawning task",
+        )
 
 
 class WorkerTerminalStatus(IsolatedAsyncioTestCase):
