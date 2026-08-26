@@ -32,9 +32,9 @@ class PodmanSpawnerInit(Init):
     def initialize(self):
         section = "spawner.podman"
 
-        help_msg = "Path to the podman binary"
+        help_msg = "Path or name of the podman binary"
         settings.register_option(
-            section=section, key="bin", help_msg=help_msg, default="/usr/bin/podman"
+            section=section, key="bin", help_msg=help_msg, default="podman"
         )
 
         this_distro = distro.detect()
