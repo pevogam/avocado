@@ -185,21 +185,23 @@ class LXCSpawner(Spawner, SpawnerMixin):
         if runtime_task.spawner_handle is None:
             return False
 
-        container = lxc.Container(runtime_task.spawner_handle)
-        if not container.defined:
-            LOG.debug(f"Container {runtime_task.spawner_handle} is not defined")
-            return False
-        if not container.running:
-            LOG.debug(
-                f"Container {runtime_task.spawner_handle} state is "
-                f"{container.state} instead of RUNNING"
-            )
+        pid = getattr(runtime_task, "lxc_task_pid", None)
+        if pid is None:
             return False
 
-        status, _, _ = LXCSpawner.run_container_cmd(
-            container, ["pgrep", "-r", "R,S", "-f", runtime_task.task.identifier]
-        )
-        return status == 0
+        try:
+            finished_pid, _ = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            finished_pid = pid
+        except OSError as error:
+            LOG.error(
+                "Could not check whether LXC task PID %s is alive: %s", pid, error
+            )
+            return True
+
+        if finished_pid == 0:
+            return True
+        return False
 
     @with_slot_reservation
     async def spawn_task(self, runtime_task):
@@ -277,13 +279,16 @@ class LXCSpawner(Spawner, SpawnerMixin):
         pid, output, err = await LXCSpawner.run_container_cmd_async(
             container, entry_point_args
         )
-        LOG.debug(f"Task spawned in container with PID {pid}")
         if pid <= 0:
             LOG.error(
-                f"Error spawning task (PID {pid}): '{err}' on "
-                f"{container_id} with output:\n{output}"
+                f"Error spawning task (PID {pid}): '{err}' error "
+                f"on {container_id} with output:\n{output}"
             )
             return False
+        else:
+            LOG.debug(f"Task spawned in container with PID {pid}")
+
+        runtime_task.lxc_task_pid = pid
 
         return True
 
