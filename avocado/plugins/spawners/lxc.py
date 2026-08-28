@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import signal
 import tempfile
 
 try:
@@ -17,6 +18,9 @@ from avocado.core.settings import settings
 from avocado.core.spawners.common import SpawnCapabilities, SpawnerMixin, SpawnMethod
 
 LOG = logging.getLogger(__name__)
+TERMINATE_GRACE_PERIOD = 30
+TERMINATE_FORCE_PERIOD = 10
+TERMINATE_POLL_INTERVAL = 0.1
 
 
 class LXCSpawnerException(Exception):
@@ -322,10 +326,52 @@ class LXCSpawner(Spawner, SpawnerMixin):
                 return
             await asyncio.sleep(0.1)
 
+    @staticmethod
+    async def _wait_task_exit(runtime_task, timeout):
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while LXCSpawner.is_task_alive(runtime_task):
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(TERMINATE_POLL_INTERVAL, remaining))
+        return True
+
     async def terminate_task(self, runtime_task):
+        pid = getattr(runtime_task, "lxc_task_pid", None)
+        if pid is not None:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            except OSError as error:
+                LOG.warning("Could not send SIGTERM to LXC task PID %s: %s", pid, error)
+            else:
+                if await LXCSpawner._wait_task_exit(
+                    runtime_task, TERMINATE_GRACE_PERIOD
+                ):
+                    return True
+
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except OSError as error:
+                    LOG.error(
+                        "Could not send SIGKILL to LXC task PID %s: %s", pid, error
+                    )
+                else:
+                    if await LXCSpawner._wait_task_exit(
+                        runtime_task, TERMINATE_FORCE_PERIOD
+                    ):
+                        return True
+
+            if await LXCSpawner._wait_task_exit(runtime_task, 0):
+                return True
+
+        LOG.warning("Falling back to shutting down the LXC container")
         container = lxc.Container(runtime_task.spawner_handle)
 
-        # Stop the container
         if not container.shutdown(30):
             LOG.warning("Failed to cleanly shutdown the container, forcing.")
             if not container.stop():

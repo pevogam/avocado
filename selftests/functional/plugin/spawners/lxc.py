@@ -1,5 +1,6 @@
 import asyncio
 import os
+import signal
 from unittest import mock
 
 from avocado import Test
@@ -53,6 +54,65 @@ class LXCSpawnerTest(Test):
         stream = container.attach.call_args.kwargs["stdout"]
         self.assertIs(stream, container.attach.call_args.kwargs["stderr"])
         self.assertTrue(stream.closed)
+
+    def test_terminate_task_tracked_pid(self):
+        """Checks that termination targets the attached task PID."""
+        runtime_task = mock.MagicMock(spawner_handle="c1", lxc_task_pid=123)
+        LXCSpawner.slots_cache = {"c1": True}
+
+        with (
+            mock.patch("avocado.plugins.spawners.lxc.os.kill") as kill,
+            mock.patch(
+                "avocado.plugins.spawners.lxc.os.waitpid", return_value=(123, 0)
+            ),
+        ):
+            self.assertTrue(asyncio.run(self.spawner.terminate_task(runtime_task)))
+
+        kill.assert_called_once_with(123, signal.SIGTERM)
+        LXC_BACKEND.Container.assert_not_called()
+        self.assertFalse(LXCSpawner.slots_cache["c1"])
+
+    def test_terminate_task_escalates_to_sigkill(self):
+        """Checks that an unresponsive task is forcibly terminated."""
+        runtime_task = mock.MagicMock(spawner_handle="c1", lxc_task_pid=123)
+        LXCSpawner.slots_cache = {"c1": True}
+
+        with (
+            mock.patch("avocado.plugins.spawners.lxc.os.kill") as kill,
+            mock.patch(
+                "avocado.plugins.spawners.lxc.os.waitpid",
+                side_effect=[(0, 0), (123, 0)],
+            ),
+            mock.patch("avocado.plugins.spawners.lxc.TERMINATE_GRACE_PERIOD", 0),
+        ):
+            self.assertTrue(asyncio.run(self.spawner.terminate_task(runtime_task)))
+
+        self.assertEqual(
+            kill.call_args_list,
+            [mock.call(123, signal.SIGTERM), mock.call(123, signal.SIGKILL)],
+        )
+        LXC_BACKEND.Container.assert_not_called()
+        self.assertFalse(LXCSpawner.slots_cache["c1"])
+
+    def test_terminate_task_falls_back_to_container(self):
+        """Checks that signaling errors fall back to container shutdown."""
+        runtime_task = mock.MagicMock(spawner_handle="c1", lxc_task_pid=123)
+        LXCSpawner.slots_cache = {"c1": True}
+        container = LXC_BACKEND.Container.return_value
+        container.shutdown.return_value = True
+
+        with (
+            mock.patch(
+                "avocado.plugins.spawners.lxc.os.kill",
+                side_effect=PermissionError("denied"),
+            ),
+            mock.patch("avocado.plugins.spawners.lxc.os.waitpid", return_value=(0, 0)),
+        ):
+            self.assertTrue(asyncio.run(self.spawner.terminate_task(runtime_task)))
+
+        LXC_BACKEND.Container.assert_called_once_with("c1")
+        container.shutdown.assert_called_once_with(30)
+        self.assertFalse(LXCSpawner.slots_cache["c1"])
 
     def test_slots_cache_custom(self):
         """Checks if custom (scheduler predefined) slots could be used from cache."""

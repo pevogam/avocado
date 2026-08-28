@@ -13,6 +13,9 @@ from avocado.core.spawners.common import SpawnerMixin, SpawnMethod
 
 LOG = logging.getLogger("avocado.job." + __name__)
 REMOTE_PID_MARKER = "__AVOCADO_REMOTE_PID__="
+TERMINATE_GRACE_PERIOD = 30
+TERMINATE_FORCE_PERIOD = 10
+TERMINATE_POLL_INTERVAL = 0.1
 
 
 class RemoteSpawnerException(Exception):
@@ -273,18 +276,41 @@ class RemoteSpawner(Spawner, SpawnerMixin):
                 return
             await asyncio.sleep(0.1)
 
+    @staticmethod
+    async def _wait_task_exit(runtime_task, timeout):
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while RemoteSpawner.is_task_alive(runtime_task):
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(TERMINATE_POLL_INTERVAL, remaining))
+        return True
+
     async def terminate_task(self, runtime_task):
         session = runtime_task.spawner_handle
-        # TODO: this still assumes synchronous remote tasks which
-        # were replaced in much earlier merged pull request
-        session.sendcontrol("c")
-        try:
-            session.read_up_to_prompt()
-            RemoteSpawner.release_slot(session)
-            return True
-        except exceptions.ExpectTimeoutError:
-            LOG.error("Failed to terminate task on {session.host}")
+        pid = getattr(runtime_task, "remote_task_pid", None)
+        if session is None or pid is None:
+            LOG.error("Remote task has no session or tracked PID to terminate")
             return False
+
+        status, output = RemoteSpawner.run_remote_cmd(session, f"kill -TERM {pid}", 10)
+        if status not in (0, 1):
+            LOG.warning("Could not send SIGTERM to remote task PID %s: %s", pid, output)
+        if await RemoteSpawner._wait_task_exit(runtime_task, TERMINATE_GRACE_PERIOD):
+            return True
+
+        status, output = RemoteSpawner.run_remote_cmd(session, f"kill -KILL {pid}", 10)
+        if status not in (0, 1):
+            LOG.error("Could not send SIGKILL to remote task PID %s: %s", pid, output)
+        if not await RemoteSpawner._wait_task_exit(
+            runtime_task, TERMINATE_FORCE_PERIOD
+        ):
+            LOG.error("Remote task PID %s did not terminate", pid)
+            return False
+
+        RemoteSpawner.release_slot(session)
+        return True
 
     @staticmethod
     async def check_task_requirements(runtime_task):
