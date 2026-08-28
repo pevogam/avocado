@@ -5,7 +5,7 @@ from unittest import mock
 from avocado import Test
 from avocado.core.job import Job
 from avocado.plugins.spawners import lxc
-from avocado.plugins.spawners.lxc import LXCSpawner
+from avocado.plugins.spawners.lxc import LXCSpawner, LXCStreamsFile
 from selftests.utils import BASEDIR
 
 LXC_BACKEND = mock.MagicMock()
@@ -30,6 +30,29 @@ class LXCSpawnerTest(Test):
 
     def tearDown(self):
         LXC_BACKEND.reset_mock()
+
+    def test_streams_file_cleanup(self):
+        """Checks that temporary stream descriptors and paths are released."""
+        with LXCStreamsFile() as stream:
+            fd = stream.fd
+            path = stream.path
+            os.fstat(fd)
+
+        with self.assertRaises(OSError):
+            os.fstat(fd)
+        self.assertFalse(os.path.exists(path))
+
+    def test_async_command_discards_streams(self):
+        """Checks that detached command output is safely discarded."""
+        container = mock.MagicMock()
+        container.attach.return_value = 123
+
+        result = asyncio.run(LXCSpawner.run_container_cmd_async(container, ["cmd"]))
+
+        self.assertEqual(result, (123, "", ""))
+        stream = container.attach.call_args.kwargs["stdout"]
+        self.assertIs(stream, container.attach.call_args.kwargs["stderr"])
+        self.assertTrue(stream.closed)
 
     def test_slots_cache_custom(self):
         """Checks if custom (scheduler predefined) slots could be used from cache."""

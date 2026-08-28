@@ -40,7 +40,14 @@ class LXCStreamsFile:
         return self
 
     def __exit__(self, *args):
-        os.remove(self.path)
+        fd, self.fd = self.fd, None
+        path, self.path = self.path, None
+        try:
+            if fd is not None:
+                os.close(fd)
+        finally:
+            if path is not None:
+                os.remove(path)
 
 
 class LXCSpawnerInit(Init):
@@ -131,12 +138,12 @@ class LXCSpawner(Spawner, SpawnerMixin):
 
     @staticmethod
     async def run_container_cmd_async(container, command):
-        with LXCStreamsFile() as tmp_out, LXCStreamsFile() as tmp_err:
+        with open(os.devnull, "wb") as devnull:
             pid = container.attach(
-                lxc.attach_run_command, command, stdout=tmp_out, stderr=tmp_err
+                lxc.attach_run_command, command, stdout=devnull, stderr=devnull
             )
             LOG.debug(f"Container async command '{command}' returned PID {pid}")
-            return pid, tmp_out.read(), tmp_err.read()
+            return pid, "", ""
 
     @staticmethod
     def release_slot(slot):
