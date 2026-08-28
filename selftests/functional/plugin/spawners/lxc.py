@@ -28,6 +28,7 @@ class LXCSpawnerTest(Test):
         with Job.from_config(job_config=config) as job:
             self.spawner = LXCSpawner(config, job)
             LXCSpawner.slots_cache = {}
+        self.spawner.create_task_output_dir = mock.Mock()
 
     def tearDown(self):
         LXC_BACKEND.reset_mock()
