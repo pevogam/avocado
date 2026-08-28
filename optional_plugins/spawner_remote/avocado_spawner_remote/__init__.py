@@ -71,7 +71,10 @@ def with_slot_reservation(fn):
     async def wrapper(self, runtime_task):
         with RemoteSpawner.reserve_slot(self, runtime_task) as slot:
             runtime_task.spawner_handle = slot
-            return await fn(self, runtime_task)
+            spawned = await fn(self, runtime_task)
+            if not spawned:
+                RemoteSpawner.release_slot(slot)
+            return spawned
 
     return wrapper
 
@@ -96,6 +99,11 @@ class RemoteSpawner(Spawner, SpawnerMixin):
         except exceptions.ShellStatusError:
             status, output = 3, "Remote command could not retrieve status"
         return status, output
+
+    @staticmethod
+    def release_slot(slot):
+        """Release an remote slot after spawning failed or its task exited."""
+        RemoteSpawner.slots_cache[slot] = False
 
     @contextlib.contextmanager
     def reserve_slot(self, runtime_task):
@@ -141,8 +149,9 @@ class RemoteSpawner(Spawner, SpawnerMixin):
 
         try:
             yield slot
-        finally:
-            RemoteSpawner.slots_cache[slot] = False
+        except BaseException:
+            RemoteSpawner.release_slot(slot)
+            raise
 
     @staticmethod
     def is_task_alive(runtime_task):
@@ -173,6 +182,7 @@ class RemoteSpawner(Spawner, SpawnerMixin):
             return True
 
         if process_state.startswith("Z"):
+            RemoteSpawner.release_slot(session)
             return False
         return True
 
@@ -265,9 +275,12 @@ class RemoteSpawner(Spawner, SpawnerMixin):
 
     async def terminate_task(self, runtime_task):
         session = runtime_task.spawner_handle
+        # TODO: this still assumes synchronous remote tasks which
+        # were replaced in much earlier merged pull request
         session.sendcontrol("c")
         try:
             session.read_up_to_prompt()
+            RemoteSpawner.release_slot(session)
             return True
         except exceptions.ExpectTimeoutError:
             LOG.error("Failed to terminate task on {session.host}")

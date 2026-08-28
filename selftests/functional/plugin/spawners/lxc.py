@@ -54,7 +54,7 @@ class LXCSpawnerTest(Test):
         LXC_BACKEND.Container.assert_called_with("c100")
         self.assertEqual(
             LXCSpawner.slots_cache,
-            {"c1": False, "c2": False, "c3": False, "c100": False},
+            {"c1": False, "c2": False, "c3": False, "c100": True},
         )
 
     def test_slots_cache_free(self):
@@ -78,9 +78,7 @@ class LXCSpawnerTest(Test):
                 asyncio.run(to_spawn)
 
         LXC_BACKEND.Container.assert_called_with("c1")
-        self.assertEqual(
-            LXCSpawner.slots_cache, {"c1": False, "c2": False, "c3": False}
-        )
+        self.assertEqual(LXCSpawner.slots_cache, {"c1": True, "c2": False, "c3": False})
 
     def test_slots_cache_free_next(self):
         """Checks if free slots could be used from cache with some slots occupied."""
@@ -104,8 +102,35 @@ class LXCSpawnerTest(Test):
                 asyncio.run(to_spawn)
 
         LXC_BACKEND.Container.assert_called_with("c2")
-        # c1 remains occupied throughout this test run
-        self.assertEqual(LXCSpawner.slots_cache, {"c1": True, "c2": False})
+        self.assertEqual(LXCSpawner.slots_cache, {"c1": True, "c2": True})
+
+    def test_slot_released_when_task_finishes(self):
+        """Checks if occupied slots are released when a task finishes."""
+        runtime_task = mock.MagicMock()
+        runtime_task.spawner_handle = None
+
+        to_spawn = self.spawner.spawn_task(runtime_task)
+        with mock.patch.object(
+            # status 1 means no previous task was detected
+            LXCSpawner,
+            "run_container_cmd",
+            return_value=(1, "", ""),
+        ):
+            with mock.patch.object(
+                LXCSpawner,
+                "run_container_cmd_async",
+                # pid 123 (rather than <=0) means successful LXC attachment
+                return_value=(123, "", ""),
+            ):
+                asyncio.run(to_spawn)
+
+        with mock.patch("avocado.plugins.spawners.lxc.os.waitpid") as waitpid:
+            waitpid.side_effect = [(0, 0), (123, 0)]
+            self.assertTrue(LXCSpawner.is_task_alive(runtime_task))
+            self.assertFalse(LXCSpawner.is_task_alive(runtime_task))
+
+        self.assertEqual(waitpid.call_args_list, [mock.call(123, os.WNOHANG)] * 2)
+        self.assertFalse(LXCSpawner.slots_cache["c1"])
 
     def test_slots_cache_full(self):
         """Checks if free slots could be used from cache with some slots occupied."""

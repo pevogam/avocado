@@ -94,7 +94,10 @@ def with_slot_reservation(fn):
     async def wrapper(self, runtime_task):
         with LXCSpawner.reserve_slot(self, runtime_task) as slot:
             runtime_task.spawner_handle = slot
-            return await fn(self, runtime_task)
+            spawned = await fn(self, runtime_task)
+            if not spawned:
+                LXCSpawner.release_slot(slot)
+            return spawned
 
     return wrapper
 
@@ -134,6 +137,11 @@ class LXCSpawner(Spawner, SpawnerMixin):
             )
             LOG.debug(f"Container async command '{command}' returned PID {pid}")
             return pid, tmp_out.read(), tmp_err.read()
+
+    @staticmethod
+    def release_slot(slot):
+        """Release an LXC slot after spawning failed or its task exited."""
+        LXCSpawner.slots_cache[slot] = False
 
     @contextlib.contextmanager
     def reserve_slot(self, runtime_task):
@@ -177,8 +185,9 @@ class LXCSpawner(Spawner, SpawnerMixin):
 
         try:
             yield slot
-        finally:
-            LXCSpawner.slots_cache[slot] = False
+        except BaseException:
+            LXCSpawner.release_slot(slot)
+            raise
 
     @staticmethod
     def is_task_alive(runtime_task):
@@ -201,6 +210,7 @@ class LXCSpawner(Spawner, SpawnerMixin):
 
         if finished_pid == 0:
             return True
+        LXCSpawner.release_slot(runtime_task.spawner_handle)
         return False
 
     @with_slot_reservation
@@ -320,6 +330,7 @@ class LXCSpawner(Spawner, SpawnerMixin):
         # if not container.destroy():
         #     LOG.error("Failed to destroy the container.")
         #     return False
+        LXCSpawner.release_slot(runtime_task.spawner_handle)
         return True
 
     @staticmethod
