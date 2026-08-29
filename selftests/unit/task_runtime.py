@@ -48,6 +48,7 @@ class Runtime(TestCase):
         self.assertIsNone(self.runtime_task.status)
         self.assertIsNone(self.runtime_task.execution_timeout)
         self.assertIsNone(self.runtime_task.spawner_handle)
+        self.assertIsNone(self.runtime_task.spawner_diagnostics)
         self.assertIsNone(self.runtime_task.spawning_result)
 
     def test(self):

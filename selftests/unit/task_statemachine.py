@@ -240,6 +240,18 @@ class WorkerTerminalStatus(IsolatedAsyncioTestCase):
             ["started", "running", "finished"],
         )
 
+    async def test_missing_finished_accepts_legacy_runtime_task(self):
+        runtime_task, status_repo, state_machine = make_started_state()
+        del runtime_task.spawner_diagnostics
+        worker = Worker(state_machine, FakeSpawner(), terminal_message_timeout=0.01)
+
+        await asyncio.wait_for(worker.monitor(), 0.5)
+
+        finished_data = status_repo.get_finished_task_data("1-noop")
+        self.assertEqual(finished_data["result"], "error")
+        self.assertNotIn("spawner_diagnostics", finished_data)
+        self.assertIsNone(runtime_task.spawner_diagnostics)
+
     async def test_missing_finished_includes_runner_diagnostics(self):
         runtime_task, status_repo, state_machine = make_started_state()
         status_repo.process_message(
