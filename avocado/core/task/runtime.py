@@ -138,6 +138,10 @@ class RuntimeTask(RuntimeTaskMixin):
         #: execution.  This may be a PID, a container ID, a FQDN+PID
         #: etc.
         self.spawner_handle = None
+        #: Optional, bounded diagnostics retained by the spawner when task
+        #: execution ends abnormally.  The state machine attaches these to a
+        #: synthetic terminal status when the runner's own status is lost.
+        self.spawner_diagnostics = None
         #: The result of the spawning of a Task
         self.spawning_result = None
         self.dependencies = []
