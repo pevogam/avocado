@@ -339,7 +339,11 @@ class Worker:
                     ),
                     None,
                 )
-                spawner_diagnostics = runtime_task.spawner_diagnostics
+                # Keep this compatible with RuntimeTask instances created by
+                # extensions (or restored state) that predate this optional
+                # diagnostic field.  Missing diagnostics must not turn the
+                # terminal-status recovery itself into a job crash.
+                spawner_diagnostics = getattr(runtime_task, "spawner_diagnostics", None)
                 reason = (
                     "Task runner exited without sending a finished status message "
                     f"within {self._terminal_message_timeout:g} seconds"
@@ -602,7 +606,9 @@ class Worker:
                         )
                     return True
 
-                diagnostics = dict(runtime_task.spawner_diagnostics or {})
+                diagnostics = dict(
+                    getattr(runtime_task, "spawner_diagnostics", None) or {}
+                )
                 diagnostics.update(
                     {
                         "terminal_status_received": True,
