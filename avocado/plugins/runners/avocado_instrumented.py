@@ -273,7 +273,17 @@ class AvocadoInstrumentedTestRunner(BaseRunner):
         while True:
             now = time.monotonic()
             timeout = max(0, next_status_time - now)
-            ready = wait((reader, process_sentinel), timeout)
+            # Closing the last queue writer makes the reader report EOF just
+            # before the process sentinel necessarily becomes readable.  Once
+            # that normal EOF has been observed, waiting on the reader again
+            # would both spin and misclassify this ordering window as a queue
+            # failure while the child still appears alive.
+            waitables = (
+                (process_sentinel,)
+                if isinstance(queue_error, EOFError)
+                else (reader, process_sentinel)
+            )
+            ready = wait(waitables, timeout)
             child_exited = process_sentinel in ready
 
             # Always drain first, including when child death and queue data become
@@ -287,7 +297,12 @@ class AvocadoInstrumentedTestRunner(BaseRunner):
                     if message.get("status") == "finished":
                         return
 
-            if queue_error is not None and not child_exited and process.is_alive():
+            if (
+                queue_error is not None
+                and not isinstance(queue_error, EOFError)
+                and not child_exited
+                and process.is_alive()
+            ):
                 writer_locked = cls._queue_writer_locked(queue)
                 fail_reason = (
                     f"Instrumented test process PID {process.pid} message queue "
