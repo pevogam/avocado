@@ -17,6 +17,10 @@ def _put_finished(queue):
 
 
 def _exit_without_finished(_queue):
+    # A process closes its pipe descriptors before its sentinel necessarily
+    # becomes readable.  Make that normal ordering window deterministic.
+    _queue._writer.close()
+    time.sleep(0.05)
     os._exit(7)  # pylint: disable=protected-access
 
 
