@@ -687,7 +687,8 @@ class GDBServer:
                 break
             except UnexpectedResponseError:
                 time.sleep(0.1)
-        c.disconnect()
+        if connection_ok:
+            c.disconnect()
         c.exit()
         if not connection_ok:
             raise ServerInitTimeoutError
