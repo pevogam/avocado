@@ -84,8 +84,10 @@ class InstrumentedRunnerMonitorTest(unittest.TestCase):
     def test_dead_child_without_finished_becomes_error(self):
         self.start_process(_exit_without_finished)
 
-        output = self.monitor()
+        with patch.object(self.process, "join", wraps=self.process.join) as join:
+            output = self.monitor()
 
+        join.assert_called_once_with()
         self.assertEqual(output[-1]["status"], "finished")
         self.assertEqual(output[-1]["result"], "error")
         self.assertEqual(output[-1]["returncode"], 7)

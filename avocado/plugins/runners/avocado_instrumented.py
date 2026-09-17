@@ -324,8 +324,10 @@ class AvocadoInstrumentedTestRunner(BaseRunner):
                 return
 
             if child_exited or not process.is_alive():
-                # Refresh exitcode and make one final drain after observing death.
-                process.join(timeout=0)
+                # The sentinel proves the child has exited, so this cannot
+                # wait on a live process.  Reap it fully before reading
+                # exitcode; a nonblocking join can leave exitcode unset.
+                process.join()
                 if queue_error is None:
                     for message in available_messages():
                         if message.get("type") != "early_state":
