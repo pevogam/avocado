@@ -5,10 +5,11 @@ import sys
 import tempfile
 import time
 import traceback
+from multiprocessing.connection import wait
 
 from avocado.core.exceptions import TestInterrupt
 from avocado.core.nrunner.app import BaseRunnerApp
-from avocado.core.nrunner.runner import RUNNER_RUN_CHECK_INTERVAL, BaseRunner
+from avocado.core.nrunner.runner import RUNNER_RUN_STATUS_INTERVAL, BaseRunner
 from avocado.core.test import TestID
 from avocado.core.tree import TreeNodeEnvOnly
 from avocado.core.utils import loader, messages
@@ -41,6 +42,8 @@ class AvocadoInstrumentedTestRunner(BaseRunner):
         "job.run.store_logging_stream",
     ]
 
+    PROCESS_JOIN_TIMEOUT = 1.0
+
     @staticmethod
     def signal_handler(signum, frame):  # pylint: disable=W0613
         if signum == signal.SIGTERM.value:
@@ -61,6 +64,47 @@ class AvocadoInstrumentedTestRunner(BaseRunner):
             tree_nodes = variant_tree_nodes
             paths = runnable.variant["paths"]
             return tree_nodes, paths
+
+    @classmethod
+    def _cleanup_process(cls, process):
+        """Reap a child, terminating it if it outlives the runner."""
+        if process is None:
+            return
+        try:
+            if process.pid is None:
+                return
+            process.join(cls.PROCESS_JOIN_TIMEOUT)
+            if process.is_alive():
+                process.terminate()
+                process.join(cls.PROCESS_JOIN_TIMEOUT)
+            if process.is_alive() and hasattr(process, "kill"):
+                process.kill()
+                process.join(cls.PROCESS_JOIN_TIMEOUT)
+            if not process.is_alive():
+                process.close()
+        except (AssertionError, OSError, ValueError):
+            # Cleanup must not replace the status already produced by the runner.
+            return
+
+    @staticmethod
+    def _close_parent_queue_writer(queue):
+        """Close the parent's unused writer so a dead producer causes EOF."""
+        writer = getattr(queue, "_writer", None)
+        if writer is not None:
+            try:
+                writer.close()
+            except (OSError, ValueError):
+                pass
+
+    @staticmethod
+    def _close_queue(queue):
+        """Close the parent side of a multiprocessing queue."""
+        close = getattr(queue, "close", None)
+        if close is not None:
+            try:
+                close()
+            except (OSError, ValueError):
+                pass
 
     @staticmethod
     def _run_avocado(runnable, queue):
@@ -138,23 +182,105 @@ class AvocadoInstrumentedTestRunner(BaseRunner):
             )
 
     @staticmethod
-    def _monitor(queue):
+    def _monitor(process, queue):
+        """Forward child messages while also watching for child process death."""
+        reader = queue._reader  # pylint: disable=protected-access
+        process_sentinel = process.sentinel
+        next_status_time = time.monotonic()
+        queue_error = None
+
+        def available_messages():
+            nonlocal queue_error
+            while reader.poll():
+                try:
+                    message = queue.get()
+                except (EOFError, OSError) as error:
+                    # Preserve a truncated-frame error if a later drain only
+                    # observes the clean EOF that follows process exit.
+                    if queue_error is None:
+                        queue_error = error
+                    return
+                yield message
+
         while True:
-            time.sleep(RUNNER_RUN_CHECK_INTERVAL)
-            if queue.empty():
+            now = time.monotonic()
+            timeout = max(0, next_status_time - now)
+            # Closing the last queue writer makes the reader report EOF just
+            # before the process sentinel necessarily becomes readable.  Once
+            # that normal EOF has been observed, waiting on the reader again
+            # would both spin and misclassify this ordering window as a queue
+            # failure while the child still appears alive.
+            waitables = (
+                (process_sentinel,)
+                if isinstance(queue_error, EOFError)
+                else (reader, process_sentinel)
+            )
+            ready = wait(waitables, timeout)
+            child_exited = process_sentinel in ready
+
+            # Always drain first, including when child death and queue data become
+            # visible together.  A queued FinishedMessage is authoritative.
+            if reader in ready or child_exited:
+                for message in available_messages():
+                    if message.get("type") != "early_state":
+                        yield message
+                        next_status_time = time.monotonic() + RUNNER_RUN_STATUS_INTERVAL
+                    if message.get("status") == "finished":
+                        return
+
+            if child_exited or not process.is_alive():
+                # The sentinel proves the child has exited, so this cannot
+                # wait on a live process.  Reap it fully before reading
+                # exitcode; a nonblocking join can leave exitcode unset.
+                process.join()
+                if queue_error is None:
+                    for message in available_messages():
+                        if message.get("type") != "early_state":
+                            yield message
+                        if message.get("status") == "finished":
+                            return
+
+                # EOF is the normal end of the one-way pipe once the producer
+                # exits.  Other errors indicate a truncated/corrupt frame.
+                if queue_error is None or isinstance(queue_error, EOFError):
+                    fail_reason = (
+                        f"Instrumented test process PID {process.pid} exited with "
+                        f"code {process.exitcode} without sending a finished message"
+                    )
+                    yield messages.FinishedMessage.get(
+                        "error",
+                        fail_reason=fail_reason,
+                        returncode=process.exitcode,
+                        fail_class="InstrumentedTestProcessError",
+                    )
+                    return
+
+            if queue_error is not None and not isinstance(queue_error, EOFError):
+                fail_reason = (
+                    f"Instrumented test process PID {process.pid} message queue "
+                    f"failed with {queue_error.__class__.__name__}: {queue_error}; "
+                    f"exit code={process.exitcode}"
+                )
+                yield messages.FinishedMessage.get(
+                    "error",
+                    fail_reason=fail_reason,
+                    returncode=process.exitcode,
+                    fail_class="InstrumentedTestMessageQueueError",
+                )
+                return
+
+            now = time.monotonic()
+            if now >= next_status_time:
                 yield messages.RunningMessage.get()
-            else:
-                message = queue.get()
-                if message.get("type") != "early_state":
-                    yield message
-                if message.get("status") == "finished":
-                    break
+                next_status_time = now + RUNNER_RUN_STATUS_INTERVAL
 
     def run(self, runnable):
         # pylint: disable=W0201
         signal.signal(signal.SIGTERM, AvocadoInstrumentedTestRunner.signal_handler)
         self.runnable = runnable
         yield messages.StartedMessage.get()
+        queue = None
+        process = None
         try:
             queue = multiprocessing.SimpleQueue()
             process = multiprocessing.Process(
@@ -162,12 +288,21 @@ class AvocadoInstrumentedTestRunner(BaseRunner):
             )
 
             process.start()
+            self._close_parent_queue_writer(queue)
 
-            yield from self._monitor(queue)
+            yield from self._monitor(process, queue)
 
         except TestInterrupt:
-            process.terminate()
-            yield from self._monitor(queue)
+            if process is not None and process.pid is not None and process.is_alive():
+                process.terminate()
+            if process is not None and process.pid is not None and queue is not None:
+                yield from self._monitor(process, queue)
+            else:
+                yield messages.FinishedMessage.get(
+                    "error",
+                    fail_reason="Runner interrupted before the test process started",
+                    fail_class="InstrumentedTestProcessError",
+                )
         except Exception as e:
             yield messages.StderrMessage.get(traceback.format_exc())
             yield messages.FinishedMessage.get(
@@ -176,6 +311,9 @@ class AvocadoInstrumentedTestRunner(BaseRunner):
                 fail_class=e.__class__.__name__,
                 traceback=traceback.format_exc(),
             )
+        finally:
+            self._cleanup_process(process)
+            self._close_queue(queue)
 
 
 class RunnerApp(BaseRunnerApp):
