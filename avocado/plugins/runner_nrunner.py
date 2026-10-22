@@ -225,6 +225,7 @@ class Runner(SuiteRunner):
     # their work per event-loop turn so status ingestion and worker timers are
     # not starved by a large presentation backlog.
     _STATUS_MESSAGES_PER_EVENT_LOOP_TURN = 64
+    _STATUS_JOURNAL_DRAIN_TIMEOUT = 30.0
 
     def __init__(self):
         super().__init__()
@@ -284,6 +285,25 @@ class Runner(SuiteRunner):
             if messages_this_turn >= self._STATUS_MESSAGES_PER_EVENT_LOOP_TURN:
                 messages_this_turn = 0
                 await asyncio.sleep(0)
+
+    async def _wait_for_status_journal(self):
+        """Give the updater a bounded opportunity to present queued messages."""
+
+        async def wait_until_empty():
+            while self.status_repo.status_journal_size:
+                await asyncio.sleep(0.01)
+
+        try:
+            await asyncio.wait_for(
+                wait_until_empty(), self._STATUS_JOURNAL_DRAIN_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            LOG_JOB.warning(
+                "Status journal still contains %d message(s) after %.1f seconds; "
+                "result presentation may be incomplete",
+                self.status_repo.status_journal_size,
+                self._STATUS_JOURNAL_DRAIN_TIMEOUT,
+            )
 
     @staticmethod
     def _abort_if_missing_runners(runnables):
@@ -411,13 +431,10 @@ class Runner(SuiteRunner):
             job.interrupted_reason = str(ex)
             summary.add("INTERRUPTED")
 
-        # Wait until all messages may have been processed by the
-        # status_updater. This should be replaced by a mechanism
-        # that only waits if there are missing status messages to
-        # be processed, and, only for a given amount of time.
-        # Tests with non received status will always show as SKIP
-        # because of result reconciliation.
-        loop.run_until_complete(asyncio.sleep(0.05))
+        # A worker can finish as soon as its terminal message reaches the
+        # repository, while presentation of that message and earlier logs may
+        # still be queued.  Drain that known work before finalizing results.
+        loop.run_until_complete(self._wait_for_status_journal())
 
         job.result.end_tests()
         # Wake the status server before waiting for its serve_forever task.
