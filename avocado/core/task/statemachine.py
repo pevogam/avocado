@@ -490,12 +490,37 @@ class Worker:
             runtime_task.task.identifier,
             self._spawner,
         )
-        start_ok = await self._spawner.spawn_task(runtime_task)
+        if self._task_timeout is not None:
+            # Include spawning in the execution deadline.  Container spawners
+            # can otherwise block before monitor() installs the timeout.
+            runtime_task.execution_timeout = time.monotonic() + self._task_timeout
+        try:
+            start_ok = await asyncio.wait_for(
+                self._spawner.spawn_task(runtime_task), self._task_timeout
+            )
+        except asyncio.TimeoutError:
+            LOG.error(
+                'Task "%s": spawner did not return before the %g-second task '
+                "execution timeout",
+                runtime_task.task.identifier,
+                self._task_timeout,
+            )
+            if runtime_task.spawner_handle is not None:
+                await self._terminate_task(runtime_task, RuntimeTaskStatus.TIMEOUT)
+            await self._send_finished_tasks_message(
+                [runtime_task], "Timeout reached while spawning task"
+            )
+            terminal_data = self._state_machine._status_repo.get_finished_task_data(
+                str(runtime_task.task.identifier)
+            )
+            runtime_task.result = terminal_data["result"]
+            await self._state_machine.finish_task(
+                runtime_task, RuntimeTaskStatus.TIMEOUT
+            )
+            return
         if start_ok:
             LOG.debug('Task "%s": spawned successfully', runtime_task.task.identifier)
             runtime_task.status = RuntimeTaskStatus.STARTED
-            if self._task_timeout is not None:
-                runtime_task.execution_timeout = time.monotonic() + self._task_timeout
             async with self._state_machine.lock:
                 self._state_machine.started.append(runtime_task)
         else:
