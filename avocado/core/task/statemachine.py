@@ -471,17 +471,26 @@ class Worker:
         await self._state_machine.abort(task_status)
         terminated = []
         while True:
+            runtime_task = None
             async with self._state_machine.lock:
                 try:
                     runtime_task = self._state_machine.monitored.pop(0)
-                    await self._terminate_task(runtime_task, task_status)
-                    terminated.append(runtime_task)
                 except IndexError:
                     if (
                         len(self._state_machine.finished) + len(terminated)
-                        == self._state_machine.task_size
+                        >= self._state_machine.task_size
                     ):
                         break
+            if runtime_task is None:
+                # Other workers may still be moving started tasks to the
+                # monitored queue.  Do not busy-spin or hold the global state
+                # lock while waiting for them.
+                await asyncio.sleep(0.01)
+                continue
+            # Spawner shutdown can be slow.  It must not hold the global state
+            # lock, which is needed by the workers being terminated.
+            await self._terminate_task(runtime_task, task_status)
+            terminated.append(runtime_task)
         return terminated
 
     async def terminate_tasks_timeout(self):
