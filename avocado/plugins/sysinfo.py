@@ -241,7 +241,7 @@ class SysInfoTest(PreTest, PostTest):
                     "sysinfo",
                     "post",
                     config=suite_config,
-                    name="post",
+                    name="post-pass",
                     sysinfo=sysinfo_config,
                     test_fail=False,
                     output_dir=test_runnable.output_dir,

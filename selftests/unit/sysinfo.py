@@ -63,9 +63,11 @@ class SysinfoTest(unittest.TestCase):
             "sysinfo.collectibles.fail_files": "/does/not/exist/fail_files",
         }
         runnable = Runnable("noop", "noop", output_dir=self.tmpdir.name)
+        post_runnables = SysInfoPlugin().post_test_runnables(runnable, config)
+        names = [post.kwargs["name"] for post, _ in post_runnables]
+        self.assertEqual(names, ["post-pass", "post-fail"])
         pass_id, fail_id = (
-            PostRuntimeTask.get_identifier(post, 1, 1)
-            for post, _ in SysInfoPlugin().post_test_runnables(runnable, config)
+            PostRuntimeTask.get_identifier(post, 1, 1) for post, _ in post_runnables
         )
 
         self.assertNotEqual(pass_id, fail_id)
