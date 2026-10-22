@@ -221,6 +221,11 @@ class Runner(SuiteRunner):
     name = "nrunner"
     description = "nrunner based implementation of job compliant runner"
 
+    # Message handlers perform synchronous result and log-file I/O.  Limit
+    # their work per event-loop turn so status ingestion and worker timers are
+    # not starved by a large presentation backlog.
+    _STATUS_MESSAGES_PER_EVENT_LOOP_TURN = 64
+
     def __init__(self):
         super().__init__()
         self.status_server_dir = None
@@ -261,17 +266,24 @@ class Runner(SuiteRunner):
 
     async def _update_status(self, job):
         message_handler = MessageHandler()
+        messages_this_turn = 0
         while True:
             try:
                 (_, task_id, _, index) = self.status_repo.status_journal_summary_pop()
 
             except IndexError:
+                messages_this_turn = 0
                 await asyncio.sleep(0.05)
                 continue
 
             message = self.status_repo.get_task_data(task_id, index)
             task = self.tsm.tasks_by_id.get(task_id)
             message_handler.process_message(message, task, job)
+
+            messages_this_turn += 1
+            if messages_this_turn >= self._STATUS_MESSAGES_PER_EVENT_LOOP_TURN:
+                messages_this_turn = 0
+                await asyncio.sleep(0)
 
     @staticmethod
     def _abort_if_missing_runners(runnables):
