@@ -16,6 +16,10 @@ class FakeStatusRepo:
             for index in range(message_count)
         ]
 
+    @property
+    def status_journal_size(self):
+        return len(self.journal)
+
     def status_journal_summary_pop(self):
         if not self.journal:
             raise IndexError
@@ -44,6 +48,21 @@ class RunnerStatusUpdate(unittest.IsolatedAsyncioTestCase):
             updater.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await updater
+
+    async def test_wait_for_status_journal_tracks_actual_backlog(self):
+        runner = Runner()
+        runner._STATUS_JOURNAL_DRAIN_TIMEOUT = 0.5
+        runner.status_repo = FakeStatusRepo(1)
+
+        async def consume_message():
+            await asyncio.sleep(0)
+            runner.status_repo.status_journal_summary_pop()
+
+        consumer = asyncio.create_task(consume_message())
+        await runner._wait_for_status_journal()
+        await consumer
+
+        self.assertEqual(runner.status_repo.status_journal_size, 0)
 
 
 if __name__ == "__main__":
