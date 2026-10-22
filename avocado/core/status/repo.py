@@ -1,3 +1,4 @@
+import asyncio
 import heapq
 import logging
 
@@ -41,6 +42,8 @@ class StatusRepo:
         #: message can arrive after a finished message, and in that case the
         #: latest arbitrary message is not the task's terminal result.
         self._finished_data = {}
+        #: Events used by state-machine workers waiting for a finished message.
+        self._finished_events = {}
 
     def _handle_task_finished(self, message):
         task_id = message["id"]
@@ -67,6 +70,9 @@ class StatusRepo:
         # repository's terminal record isolated from those presentation-side
         # mutations.
         self._finished_data[task_id] = message.copy()
+        finished_event = self._finished_events.get(task_id)
+        if finished_event is not None:
+            finished_event.set()
         LOG.debug('Task "%s" finished message: "%s"', task_id, message)
 
     def _handle_task_started(self, message):
@@ -117,6 +123,23 @@ class StatusRepo:
         that :meth:`get_latest_task_data` is a terminal message.
         """
         return self._finished_data.get(task_id)
+
+    async def wait_for_task_finished(self, task_id, timeout):
+        """Wait until a finished message for ``task_id`` is available.
+
+        :param task_id: task identifier
+        :param timeout: maximum number of seconds to wait
+        :raises asyncio.TimeoutError: when no finished message arrives in time
+        :returns: the task's finished message
+        """
+        finished_data = self.get_finished_task_data(task_id)
+        if finished_data is not None:
+            return finished_data
+
+        finished_event = self._finished_events.setdefault(task_id, asyncio.Event())
+
+        await asyncio.wait_for(finished_event.wait(), timeout)
+        return self.get_finished_task_data(task_id)
 
     def status_journal_summary_pop(self):
         return heapq.heappop(self._status_journal_summary)
