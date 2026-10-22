@@ -33,13 +33,16 @@ from avocado.core.settings import settings
 from avocado.core.status.repo import StatusRepo
 from avocado.core.status.server import StatusServer
 from avocado.core.task.runtime import RuntimeTaskGraph
-from avocado.core.task.statemachine import TaskStateMachine, Worker
+from avocado.core.task.statemachine import (
+    DEFAULT_TERMINAL_MESSAGE_TIMEOUT,
+    TaskStateMachine,
+    Worker,
+)
 
 DEFAULT_SERVER_URI = "127.0.0.1:8888"
 
 
 class RunnerInit(Init):
-
     name = "nrunner"
     description = "nrunner initialization"
 
@@ -143,9 +146,21 @@ class RunnerInit(Init):
             help_msg=help_msg,
         )
 
+        help_msg = (
+            "Seconds to wait after a task runner exits for its finished status "
+            "message. If it does not arrive, the task ends with ERROR instead "
+            "of blocking the state machine indefinitely."
+        )
+        settings.register_option(
+            section="task.timeout",
+            key="finished_status",
+            default=DEFAULT_TERMINAL_MESSAGE_TIMEOUT,
+            key_type=float,
+            help_msg=help_msg,
+        )
+
 
 class RunnerCLI(CLI):
-
     name = "nrunner"
     description = 'nrunner command line options for "run"'
 
@@ -203,7 +218,6 @@ class RunnerCLI(CLI):
 
 
 class Runner(SuiteRunner):
-
     name = "nrunner"
     description = "nrunner based implementation of job compliant runner"
 
@@ -327,6 +341,9 @@ class Runner(SuiteRunner):
             test_suite.config.get("run.max_parallel_tasks"), len(self.runtime_tasks)
         )
         timeout = test_suite.config.get("task.timeout.running")
+        terminal_message_timeout = test_suite.config.get(
+            "task.timeout.finished_status", DEFAULT_TERMINAL_MESSAGE_TIMEOUT
+        )
         failfast = test_suite.config.get("run.failfast")
         workers = [
             Worker(
@@ -335,6 +352,7 @@ class Runner(SuiteRunner):
                 max_running=max_running,
                 task_timeout=timeout,
                 failfast=failfast,
+                terminal_message_timeout=terminal_message_timeout,
             ).run()
             for _ in range(max_running)
         ]
@@ -355,6 +373,7 @@ class Runner(SuiteRunner):
                     max_running=max_running,
                     task_timeout=timeout,
                     failfast=failfast,
+                    terminal_message_timeout=terminal_message_timeout,
                 )
                 loop.run_until_complete(
                     asyncio.wait_for(terminate_worker.terminate_tasks_timeout(), None)
@@ -367,6 +386,7 @@ class Runner(SuiteRunner):
                     max_running=max_running,
                     task_timeout=timeout,
                     failfast=failfast,
+                    terminal_message_timeout=terminal_message_timeout,
                 )
                 loop.run_until_complete(
                     asyncio.wait_for(
