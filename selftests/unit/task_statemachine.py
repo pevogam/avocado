@@ -33,6 +33,19 @@ class FakeSpawner:
         return True
 
 
+class BlockingSpawner(FakeSpawner):
+    def __init__(self):
+        super().__init__()
+        self.spawn_cancelled = asyncio.Event()
+
+    async def spawn_task(self, _runtime_task):
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            self.spawn_cancelled.set()
+            raise
+
+
 def make_started_state():
     runnable = Runnable("noop", "noop")
     task = Task(runnable, identifier="1-noop", job_id=JOB_ID)
@@ -43,6 +56,35 @@ def make_started_state():
     state_machine.requested.clear()
     state_machine.started.append(runtime_task)
     return runtime_task, status_repo, state_machine
+
+
+def make_ready_state():
+    runtime_task, status_repo, state_machine = make_started_state()
+    state_machine.started.clear()
+    state_machine.ready.append(runtime_task)
+    return runtime_task, status_repo, state_machine
+
+
+class WorkerSpawnStatus(IsolatedAsyncioTestCase):
+    async def test_task_timeout_also_bounds_spawning(self):
+        runtime_task, status_repo, state_machine = make_ready_state()
+        spawner = BlockingSpawner()
+        worker = Worker(state_machine, spawner, task_timeout=0.01)
+
+        with self.assertLogs("avocado.core.task.statemachine", level="ERROR") as logs:
+            await asyncio.wait_for(worker.start(), 0.5)
+
+        self.assertTrue(spawner.spawn_cancelled.is_set())
+        self.assertEqual(spawner.terminated, [])
+        self.assertIn("task execution timeout", logs.output[0])
+        self.assertEqual(runtime_task.result, "interrupted")
+        self.assertEqual(runtime_task.status, RuntimeTaskStatus.TIMEOUT)
+        self.assertEqual(state_machine.started, [])
+        self.assertEqual(state_machine.finished, [runtime_task])
+        self.assertEqual(
+            status_repo.get_finished_task_data("1-noop")["fail_reason"],
+            "Test interrupted: Timeout reached while spawning task",
+        )
 
 
 class WorkerTerminalStatus(IsolatedAsyncioTestCase):
