@@ -13,6 +13,10 @@ from avocado.core.nrunner.runnable import (
 
 LOG = logging.getLogger(__name__)
 
+# Status delivery is on the runner's critical path.  Keep a non-responsive
+# receiver from blocking the runner (and therefore task completion) forever.
+DEFAULT_STATUS_SOCKET_TIMEOUT = 30.0
+
 #: The default category for tasks, and the value that will cause the
 #: task results to be included in the job results
 TASK_DEFAULT_CATEGORY = "test"
@@ -38,8 +42,9 @@ class TaskStatusService:
     TODO: make the interface generic and this just one of the implementations
     """
 
-    def __init__(self, uri):
+    def __init__(self, uri, timeout=DEFAULT_STATUS_SOCKET_TIMEOUT):
         self.uri = uri
+        self.timeout = timeout
         self._connection = None
 
     @property
@@ -72,17 +77,27 @@ class TaskStatusService:
             port = int(port)
             for _ in range(600):
                 try:
-                    self._connection = socket.create_connection((host, port))
+                    self._connection = socket.create_connection(
+                        (host, port), timeout=self.timeout
+                    )
                     break
                 except ConnectionRefusedError as error:
                     LOG.warning(error)
                     time.sleep(1)
             else:
-                self._connection = socket.create_connection((host, port))
+                self._connection = socket.create_connection(
+                    (host, port), timeout=self.timeout
+                )
         else:
-            self._connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            self._connection.connect(self.uri)
-        self._connection.settimeout(5)
+            connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                connection.settimeout(self.timeout)
+                connection.connect(self.uri)
+            except OSError:
+                connection.close()
+                raise
+            self._connection = connection
+            LOG.debug("Connected to task status service at %s", self.uri)
 
     def post(self, status):
         data = json_dumps(status)
