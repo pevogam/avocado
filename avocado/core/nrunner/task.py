@@ -23,7 +23,6 @@ TASK_DEFAULT_CATEGORY = "test"
 
 
 class StatusEncoder(json.JSONEncoder):
-
     # pylint: disable=E0202
     def default(self, o):
         if isinstance(o, bytes):
@@ -47,6 +46,12 @@ class TaskStatusService:
         self.timeout = timeout
         self._connection = None
 
+    #: Number of attempts made while waiting for a newly started status
+    #: server.  Runners and the status server are started independently, so
+    #: the first connection has to tolerate that race.
+    CONNECTION_ATTEMPTS = 600
+    CONNECTION_RETRY_INTERVAL = 1
+
     @property
     def connection(self):
         if self._connection is None:
@@ -68,26 +73,39 @@ class TaskStatusService:
                 error,
             )
 
-    def _create_connection(self):
+    def _create_connection(self, retry=True):
         """
         Creates connection with `self.uri` based on `socket.create_connection`
+
+        The initial connection retries because the runner may win the startup
+        race with the status server.  A reconnect after an established
+        connection fails is attempted only once so a disappeared status
+        server cannot stall the task for several minutes.
         """
+        self._close_connection()
         if ":" in self.uri:
             host, port = self.uri.split(":")
             port = int(port)
-            for _ in range(600):
+            attempts = self.CONNECTION_ATTEMPTS if retry else 1
+            for attempt in range(1, attempts + 1):
                 try:
                     self._connection = socket.create_connection(
                         (host, port), timeout=self.timeout
                     )
-                    break
+                    LOG.debug("Connected to task status service at %s", self.uri)
+                    return
                 except ConnectionRefusedError as error:
-                    LOG.warning(error)
-                    time.sleep(1)
-            else:
-                self._connection = socket.create_connection(
-                    (host, port), timeout=self.timeout
-                )
+                    if attempt == attempts:
+                        raise
+                    LOG.warning(
+                        "Task status service at %s refused connection "
+                        "(attempt %d/%d): %s",
+                        self.uri,
+                        attempt,
+                        attempts,
+                        error,
+                    )
+                    time.sleep(self.CONNECTION_RETRY_INTERVAL)
         else:
             connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
@@ -100,19 +118,43 @@ class TaskStatusService:
             LOG.debug("Connected to task status service at %s", self.uri)
 
     def post(self, status):
-        data = json_dumps(status)
+        data = (json_dumps(status) + "\n").encode("ascii")
+        task_id = status.get("id")
+        task_status = status.get("status")
         try:
-            self.connection.sendall(data.encode("ascii") + "\n".encode("ascii"))
-        except socket.timeout:
-            LOG.warning(f"Connection with {self.uri} has timed out.")
-            return False
-        except BrokenPipeError:
+            # A status message is newline framed.  A plain send() is allowed
+            # to write only part of it and silently corrupt the stream.
+            self.connection.sendall(data)
+        except OSError as error:
+            LOG.warning(
+                "Failed to send task status message to %s "
+                "(task=%r, status=%r, size=%d, timeout=%r); "
+                "reconnecting once: %s",
+                self.uri,
+                task_id,
+                task_status,
+                len(data),
+                self.timeout,
+                error,
+            )
+            self._close_connection()
             try:
-                self._create_connection()
-                self.connection.sendall(data.encode("ascii") + "\n".encode("ascii"))
-            except (ConnectionRefusedError, socket.timeout):
-                LOG.warning(f"Connection with {self.uri} has been lost.")
+                self._create_connection(retry=False)
+                self.connection.sendall(data)
+            except OSError as reconnect_error:
+                self._close_connection()
+                LOG.warning(
+                    "Connection with %s has been lost. "
+                    "Task status message was not delivered "
+                    "(task=%r, status=%r, size=%d): %s",
+                    self.uri,
+                    task_id,
+                    task_status,
+                    len(data),
+                    reconnect_error,
+                )
                 return False
+            LOG.info("Reconnected to task status service at %s", self.uri)
         return True
 
     def close(self):
