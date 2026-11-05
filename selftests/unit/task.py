@@ -15,6 +15,17 @@ from avocado.core.nrunner.task import Task, TaskStatusService
 from avocado.core.utils import messages
 
 
+class TaskStatusServiceTest(unittest.TestCase):
+    def setUp(self):
+        self.service = TaskStatusService("127.0.0.1:8888")
+
+    def test_close_does_not_create_a_connection(self):
+        with patch.object(self.service, "_create_connection") as create_connection:
+            self.service.close()
+
+        create_connection.assert_not_called()
+
+
 class TaskTest(unittest.TestCase):
     def test_post_delivers_complete_message(self):
         for reconnect, timeout in (
