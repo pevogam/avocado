@@ -16,6 +16,30 @@ class TaskStatusServiceTest(unittest.TestCase):
 
         create_connection.assert_not_called()
 
+    def test_tcp_connection_uses_configured_timeout(self):
+        service = TaskStatusService("127.0.0.1:8888", timeout=1.25)
+        connection = Mock()
+
+        with patch(
+            "avocado.core.nrunner.task.socket.create_connection",
+            return_value=connection,
+        ) as create_connection:
+            service._create_connection()
+
+        create_connection.assert_called_once_with(("127.0.0.1", 8888), timeout=1.25)
+        self.assertIs(service.connection, connection)
+
+    def test_unix_connection_uses_configured_timeout(self):
+        service = TaskStatusService("/tmp/avocado-status.sock", timeout=2.5)
+        connection = Mock()
+
+        with patch("avocado.core.nrunner.task.socket.socket", return_value=connection):
+            service._create_connection()
+
+        connection.settimeout.assert_called_once_with(2.5)
+        connection.connect.assert_called_once_with("/tmp/avocado-status.sock")
+        self.assertIs(service.connection, connection)
+
 
 class TaskTest(unittest.TestCase):
     def test_post_delivers_complete_message(self):
