@@ -194,8 +194,11 @@ class AvocadoInstrumentedTestRunner(BaseRunner):
             while reader.poll():
                 try:
                     message = queue.get()
-                except EOFError as error:
-                    queue_error = error
+                except (EOFError, OSError) as error:
+                    # Preserve a truncated-frame error if a later drain only
+                    # observes the clean EOF that follows process exit.
+                    if queue_error is None:
+                        queue_error = error
                     return
                 yield message
 
@@ -251,6 +254,20 @@ class AvocadoInstrumentedTestRunner(BaseRunner):
                         fail_class="InstrumentedTestProcessError",
                     )
                     return
+
+            if queue_error is not None and not isinstance(queue_error, EOFError):
+                fail_reason = (
+                    f"Instrumented test process PID {process.pid} message queue "
+                    f"failed with {queue_error.__class__.__name__}: {queue_error}; "
+                    f"exit code={process.exitcode}"
+                )
+                yield messages.FinishedMessage.get(
+                    "error",
+                    fail_reason=fail_reason,
+                    returncode=process.exitcode,
+                    fail_class="InstrumentedTestMessageQueueError",
+                )
+                return
 
             now = time.monotonic()
             if now >= next_status_time:
