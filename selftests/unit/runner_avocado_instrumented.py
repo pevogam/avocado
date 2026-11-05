@@ -1,5 +1,6 @@
 import multiprocessing
 import os
+import struct
 import time
 import unittest
 from unittest.mock import patch
@@ -19,6 +20,15 @@ def _exit_without_finished(_queue):
     _queue._writer.close()
     time.sleep(0.05)
     os._exit(7)  # pylint: disable=protected-access
+
+
+def _write_partial_queue_frame(queue):
+    # multiprocessing.connection uses a network-order signed length followed
+    # by the pickle payload.  Deliberately die halfway through that frame.
+    os.write(queue._writer.fileno(), struct.pack("!i", 4096) + b"partial")
+    # Give the monitor time to enter recv() before closing the only writer.
+    time.sleep(0.05)
+    os._exit(8)  # pylint: disable=protected-access
 
 
 def _put_many_messages(queue, count):
@@ -76,6 +86,16 @@ class InstrumentedRunnerMonitorTest(unittest.TestCase):
         self.assertEqual(output[-1]["result"], "error")
         self.assertEqual(output[-1]["returncode"], 7)
         self.assertIn("without sending a finished message", output[-1]["fail_reason"])
+
+    @unittest.skipIf(os.name == "nt", "relies on POSIX pipe framing and os._exit")
+    def test_partial_queue_frame_does_not_block_monitor(self):
+        self.start_process(_write_partial_queue_frame)
+
+        output = self.monitor()
+
+        self.assertEqual(output[-1]["status"], "finished")
+        self.assertEqual(output[-1]["result"], "error")
+        self.assertEqual(output[-1]["fail_class"], "InstrumentedTestMessageQueueError")
 
     def test_drains_log_burst_without_one_message_per_poll_delay(self):
         message_count = 500
