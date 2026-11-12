@@ -88,6 +88,58 @@ class WorkerSpawnStatus(IsolatedAsyncioTestCase):
 
 
 class WorkerTerminalStatus(IsolatedAsyncioTestCase):
+    async def test_finished_task_is_not_terminated_after_its_deadline(self):
+        runtime_task, status_repo, state_machine = make_started_state()
+        status_repo.process_message(
+            {
+                "id": "1-noop",
+                "job_id": JOB_ID,
+                "status": "finished",
+                "result": "pass",
+                "time": 1.0,
+            }
+        )
+        # The deadline has expired, but the task has already reported success.
+        runtime_task.execution_timeout = 0
+        spawner = FakeSpawner(alive=True)
+
+        await asyncio.wait_for(Worker(state_machine, spawner).monitor(), 0.5)
+
+        self.assertEqual(spawner.terminated, [])
+        self.assertEqual(runtime_task.result, "pass")
+        self.assertEqual(state_machine.finished, [runtime_task])
+        self.assertEqual(state_machine.monitored, [])
+
+    async def test_shared_identifier_does_not_skip_spawner_wait(self):
+        for add_dynamically in (False, True):
+            with self.subTest(add_dynamically=add_dynamically):
+                runtime_task, status_repo, state_machine = make_started_state()
+                duplicate = RuntimeTask(runtime_task.task)
+                if add_dynamically:
+                    await state_machine.add_new_task(duplicate)
+                else:
+                    state_machine = TaskStateMachine(
+                        [runtime_task, duplicate], status_repo
+                    )
+                    state_machine.requested.clear()
+                    state_machine.started.append(runtime_task)
+                # This result may belong to the other task with the same ID.
+                status_repo.process_message(
+                    {
+                        "id": "1-noop",
+                        "job_id": JOB_ID,
+                        "status": "finished",
+                        "result": "pass",
+                        "time": 1.0,
+                    }
+                )
+                runtime_task.execution_timeout = 0
+                spawner = FakeSpawner(alive=True)
+
+                await asyncio.wait_for(Worker(state_machine, spawner).monitor(), 0.5)
+
+                self.assertEqual(spawner.terminated, [runtime_task])
+
     async def test_late_running_message_does_not_obscure_result(self):
         runtime_task, status_repo, state_machine = make_started_state()
         status_repo.process_message(
