@@ -22,6 +22,7 @@ class TaskStateMachine:
     """Represents all phases that a task can go through its life."""
 
     def __init__(self, tasks, status_repo):
+        tasks = list(tasks)
         self._requested = collections.deque(tasks)
         self._status_repo = status_repo
         self._triaging = []
@@ -32,6 +33,9 @@ class TaskStateMachine:
         self._lock = asyncio.Lock()
         self._cache_lock = asyncio.Lock()
         self._task_size = len(tasks)
+        self._task_identifier_counts = collections.Counter(
+            str(runtime_task.task.identifier) for runtime_task in tasks
+        )
 
         self._tasks_by_id = {
             str(runtime_task.task.identifier): runtime_task.task
@@ -84,10 +88,17 @@ class TaskStateMachine:
     def tasks_by_id(self):
         return self._tasks_by_id
 
+    def is_task_identifier_unique(self, runtime_task):
+        """Return whether terminal status can identify this runtime task."""
+        task_id = str(runtime_task.task.identifier)
+        return self._task_identifier_counts[task_id] == 1
+
     async def add_new_task(self, runtime_task):
         async with self.lock:
             self._requested.appendleft(runtime_task)
-            self._tasks_by_id[str(runtime_task.task.identifier)] = runtime_task.task
+            task_id = str(runtime_task.task.identifier)
+            self._tasks_by_id[task_id] = runtime_task.task
+            self._task_identifier_counts[task_id] += 1
         return
 
     async def abort(self, status_reason=None):
@@ -541,7 +552,18 @@ class Worker:
             # finished message.
             self._state_machine.monitored.append(runtime_task)
 
-        if self._spawner.is_task_alive(runtime_task):
+        terminal_data = None
+        if self._state_machine.is_task_identifier_unique(runtime_task):
+            terminal_data = self._state_machine._status_repo.get_finished_task_data(
+                str(runtime_task.task.identifier)
+            )
+        if terminal_data is not None:
+            LOG.debug(
+                'Task "%s" reached monitor phase with terminal status already '
+                "available",
+                runtime_task.task.identifier,
+            )
+        elif self._spawner.is_task_alive(runtime_task):
             LOG.debug(
                 'Task "%s" is alive at monitor phase', runtime_task.task.identifier
             )
@@ -567,7 +589,9 @@ class Worker:
         # latest running messages must not obscure the task's finished result if any
         # If the runner exited without sending one, bound the grace period and
         # turn that runner protocol failure into a clear ERROR.
-        latest_task_data = await self._get_terminal_task_data(runtime_task)
+        latest_task_data = terminal_data or await self._get_terminal_task_data(
+            runtime_task
+        )
         if latest_task_data is None:
             # A terminating worker took ownership while terminal status was
             # being reconciled.
