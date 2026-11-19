@@ -1,6 +1,9 @@
 import base64
+import copy
 import json
 import logging
+import os
+import shutil
 import socket
 import tempfile
 import time
@@ -10,6 +13,7 @@ from avocado.core.nrunner.runnable import (
     RUNNERS_REGISTRY_STANDALONE_EXECUTABLE,
     Runnable,
 )
+from avocado.core.utils import messages
 
 LOG = logging.getLogger(__name__)
 
@@ -129,6 +133,7 @@ class Task:
         status_uris=None,
         category=TASK_DEFAULT_CATEGORY,
         job_id=None,
+        temporary_output=False,
     ):
         """Instantiates a new Task.
 
@@ -151,6 +156,9 @@ class Task:
                        sent to the destination job's status server and will make
                        into the job's results.
         :type job_id: str
+        :param temporary_output: collect output in a temporary directory and
+                                 send its files through the status services
+        :type temporary_output: bool
         """
         # pylint: disable=W0201
         self.runnable = runnable
@@ -159,6 +167,8 @@ class Task:
         #: will not be accounted for on a Job's test results.
         self.category = category
         self.job_id = job_id
+        self.temporary_output = temporary_output
+        self._output_collection_failed = False
         self.status_services = []
         status_uris = status_uris or self.runnable.config.get("run.status_server_uri")
         if status_uris is not None:
@@ -221,7 +231,7 @@ class Task:
         category = recipe.get("category")
         return cls(runnable, identifier, status_uris, category)
 
-    def get_command_args(self):
+    def get_command_args(self, temporary_output=False):
         """
         Returns the command arguments that adhere to the runner interface
 
@@ -230,9 +240,19 @@ class Task:
 
         :returns: the arguments that can be used on an avocado-runner command
         :rtype: list
+        :param temporary_output: request output collection without sharing the
+                                 job's output directory with the runner
+        :type temporary_output: bool
         """
         args = ["-i", str(self.identifier), "-j", str(self.job_id)]
-        args += self.runnable.get_command_args()
+        runnable = self.runnable
+        if temporary_output or self.temporary_output:
+            # Keep the job's destination on the original runnable.  Only the
+            # runner process should choose a temporary directory of its own.
+            runnable = copy.copy(runnable)
+            runnable.output_dir = None
+            args.append("--temporary-output")
+        args += runnable.get_command_args()
 
         for status_service in self.status_services:
             args.append("-s")
@@ -240,14 +260,67 @@ class Task:
 
         return args
 
+    def _collect_output(self, runner):
+        """Send regular output files before the runner's finished message."""
+        finished = None
+        for status in runner.run(self.runnable):
+            if status["status"] == "finished":
+                finished = status
+            else:
+                yield status
+
+        def walk_error(error):
+            raise error
+
+        try:
+            for root, _, files in os.walk(self.runnable.output_dir, onerror=walk_error):
+                for filename in files:
+                    path = os.path.join(root, filename)
+                    relative_path = os.path.relpath(path, self.runnable.output_dir)
+                    if os.path.islink(path) or not os.path.isfile(path):
+                        continue
+                    with open(path, "rb") as output_file:
+                        # Send empty files too, and bound each status message.
+                        data = output_file.read(200000)
+                        yield messages.FileMessage.get(
+                            data, relative_path, append=False
+                        )
+                        while data:
+                            data = output_file.read(200000)
+                            if data:
+                                yield messages.FileMessage.get(data, relative_path)
+        except OSError as error:
+            self._output_collection_failed = True
+            finished = messages.FinishedMessage.get(
+                "error", fail_reason=f"Could not collect task output: {error}"
+            )
+
+        if finished is not None:
+            # The status journal orders messages by timestamp, so completion
+            # must sort after the file messages produced during collection.
+            finished["time"] = time.monotonic()
+            yield finished
+
     def run(self):
-        self.setup_output_dir()
-        runner_klass = self.runnable.pick_runner_class()
-        runner = runner_klass()
+        original_output_dir = self.runnable.output_dir
+        if self.temporary_output:
+            self.runnable.output_dir = tempfile.mkdtemp(prefix=".avocado-task-")
+        else:
+            self.setup_output_dir()
         running_status_services = self.status_services
         damaged_status_services = []
+        delivery_failed = False
+        completed = False
+        self._output_collection_failed = False
         try:
-            for status in runner.run(self.runnable):
+            runner_klass = self.runnable.pick_runner_class()
+            runner = runner_klass()
+            statuses = (
+                self._collect_output(runner)
+                if self.temporary_output
+                else runner.run(self.runnable)
+            )
+            for status in statuses:
                 if status["status"] == "started":
                     status.update({"output_dir": self.runnable.output_dir})
                 status.update({"id": self.identifier})
@@ -257,6 +330,7 @@ class Task:
                     if not status_service.post(status):
                         damaged_status_services.append(status_service)
                 if damaged_status_services:
+                    delivery_failed = True
                     running_status_services = list(
                         filter(
                             lambda s: s not in damaged_status_services,
@@ -264,7 +338,26 @@ class Task:
                         )
                     )
                     damaged_status_services.clear()
+                if status["status"] == "finished":
+                    completed = True
                 yield status
+            completed = completed or not self.temporary_output
         finally:
             for status_service in self.status_services:
                 status_service.close()
+            if self.temporary_output:
+                output_dir = self.runnable.output_dir
+                self.runnable.output_dir = original_output_dir
+                if (
+                    completed
+                    and not delivery_failed
+                    and not self._output_collection_failed
+                ):
+                    try:
+                        shutil.rmtree(output_dir)
+                    except OSError as error:
+                        LOG.warning(
+                            "Could not remove task output %s: %s", output_dir, error
+                        )
+                else:
+                    LOG.warning("Task output preserved in %s", output_dir)

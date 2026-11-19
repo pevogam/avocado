@@ -75,6 +75,44 @@ we are talking about the nrunner.  It includes:
 * :mod:`avocado.core.resolver` module to resolve tests
 * :mod:`avocado.core.spawners` modules to spawn tasks
 
+Task output directories
+-----------------------
+
+The job assigns each task a destination under its ``test-results`` directory.
+The process spawner writes there directly.  The Podman spawner bind-mounts
+that directory into the container, so files appear in the job directory
+without a copy at the end of the task.
+
+The LXC and remote spawners copy task output by default, using
+``task-run --temporary-output`` internally.
+The runner creates a unique ``.avocado-task-*`` directory using Python's
+temporary-directory location (normally ``/tmp``) in its execution environment.
+After the runner completes, the task sends regular files, including nested
+and empty files, through its existing status connection in chunks of at most
+200,000 bytes.  The job saves them under the task's destination before
+processing completion.  Each file snapshot replaces any contents previously
+written from log or file messages, avoiding duplicate data.  Symbolic links
+and special files are not collected.
+
+When the job results directory is mounted at the same path in the task
+environment, disable copying in the relevant spawner's configuration::
+
+    [spawner.lxc]
+    copy_output = False
+
+    [spawner.remote]
+    copy_output = False
+
+With copying disabled, the runner writes directly into the mounted results
+directory, as these spawners previously assumed.
+
+After successful delivery the temporary directory is removed.  Collection
+errors produce an error result and preserve the temporary directory; detected
+status-connection failures also preserve it.  A forced termination or a lost
+execution environment can prevent collection, leaving only messages already
+received by the job.  Both the job and the isolated runner must use an
+Avocado version supporting ``--temporary-output``.
+
 Basic Avocado usage and workflow
 --------------------------------
 

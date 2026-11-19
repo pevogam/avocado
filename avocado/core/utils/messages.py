@@ -156,8 +156,11 @@ class FileMessage(GenericRunningMessage):
     message_type = "file"
 
     @classmethod
-    def get(cls, msg, path):  # pylint: disable=W0221
-        return super().get(msg=msg, path=path)
+    def get(cls, msg, path, append=True):  # pylint: disable=W0221
+        message = super().get(msg=msg, path=path)
+        if not append:
+            message["append"] = False
+        return message
 
 
 _supported_types = {
