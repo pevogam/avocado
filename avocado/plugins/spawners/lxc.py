@@ -66,6 +66,18 @@ class LXCSpawnerInit(Init):
             section=section, key="slots", help_msg=help_msg, key_type=list, default=[]
         )
 
+        help_msg = (
+            "Copy temporary task output into the job results. Disable when the "
+            "job results directory is mounted at the same path in the task environment."
+        )
+        settings.register_option(
+            section=section,
+            key="copy_output",
+            help_msg=help_msg,
+            key_type=bool,
+            default=True,
+        )
+
         help_msg = "Distribution for the LXC container"
         settings.register_option(
             section=section, key="dist", help_msg=help_msg, default="fedora"
@@ -238,7 +250,8 @@ class LXCSpawner(Spawner, SpawnerMixin):
             raise LXCSpawnerException(msg)
         # using the "python" symlink will result in the container default python version
         entry_point_args = ["python3", "-m", full_module_name, "task-run"]
-        entry_point_args.extend(task.get_command_args())
+        copy_output = self.config.get("spawner.lxc.copy_output", True)
+        entry_point_args.extend(task.get_command_args(temporary_output=copy_output))
 
         dist = self.config.get("spawner.lxc.dist")
         release = self.config.get("spawner.lxc.release")
@@ -315,10 +328,7 @@ class LXCSpawner(Spawner, SpawnerMixin):
 
     def create_task_output_dir(self, runtime_task):
         output_dir_path = self.task_output_dir(runtime_task)
-        output_lxc_path = "/tmp/.avocado_task_output_dir"
-
         os.makedirs(output_dir_path, exist_ok=True)
-        runtime_task.task.setup_output_dir(output_lxc_path)
 
     async def wait_task(self, runtime_task):
         while True:

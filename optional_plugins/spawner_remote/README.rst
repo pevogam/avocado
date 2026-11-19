@@ -37,3 +37,19 @@ of module ``remote``, e.g.::
 
 Final important detail: the remote site also needs avocado
 installed.
+
+By default, task output is collected in a unique temporary directory on the
+remote site.
+Before reporting completion, the runner sends its files through the status
+connection into the job's ``test-results`` directory, then removes the
+temporary directory.  Shared storage and a separate SSH file-transfer
+connection are not required.  Both sites must have an Avocado version
+supporting ``task-run --temporary-output``.  Forced termination can prevent
+file collection; detected collection or connection failures preserve the
+temporary directory for recovery.
+
+If the job results directory is mounted at the same path on the remote site,
+restore direct writes to that shared directory by disabling copying::
+
+    [spawner.remote]
+    copy_output = False

@@ -80,6 +80,13 @@ class BaseRunnerApp:
 
     CMD_TASK_RUN_ARGS = (
         (
+            ("--temporary-output",),
+            {
+                "action": "store_true",
+                "help": "Send temporary output files through the status services",
+            },
+        ),
+        (
             ("-i", "--identifier"),
             {"type": str, "required": True, "help": "Task unique identifier"},
         ),
@@ -287,6 +294,7 @@ class BaseRunnerApp:
             args.get("status_uri", []),
             category=args.get("category", TASK_DEFAULT_CATEGORY),
             job_id=args.get("job_id"),
+            temporary_output=args.get("temporary_output", False),
         )
         for status in task.run():
             self.echo(status)

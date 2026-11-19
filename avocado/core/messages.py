@@ -289,7 +289,7 @@ class BaseRunningMessageHandler(BaseMessageHandler):
         return message
 
     @staticmethod
-    def _save_message_to_file(filename, buff, task, encoding=None):
+    def _save_message_to_file(filename, buff, task, encoding=None, append=True):
         """
         Method for saving messages into the file
 
@@ -306,6 +306,8 @@ class BaseRunningMessageHandler(BaseMessageHandler):
         :type task: :class:`avocado.core.nrunner.Task`
         :param encoding: encoding of buff, default is None
         :type encoding: str
+        :param append: append to the file, or replace its contents when false
+        :type append: bool
         """
 
         def _save_to_file(file_name, mode):
@@ -315,9 +317,9 @@ class BaseRunningMessageHandler(BaseMessageHandler):
         file = os.path.join(task.metadata["task_path"], filename)
         if encoding:
             buff = BaseRunningMessageHandler._message_to_line(buff, encoding)
-            _save_to_file(file, "a")
+            _save_to_file(file, "a" if append else "w")
         else:
-            _save_to_file(file, "ab")
+            _save_to_file(file, "ab" if append else "wb")
 
 
 class LogMessageHandler(BaseRunningMessageHandler):
@@ -496,6 +498,9 @@ class FileMessageHandler(BaseRunningMessageHandler):
     :type path: string
     :param log: data to be saved inside file
     :type log: bytes
+    :param append: append data (the default), or replace existing contents
+                  when false, as for the first chunk of a file snapshot
+    :type append: bool
     :param time: Time stamp of the message
     :type time: float
 
@@ -510,7 +515,11 @@ class FileMessageHandler(BaseRunningMessageHandler):
         if not os.path.exists(file):
             os.makedirs(os.path.dirname(file), exist_ok=True)
         self._save_message_to_file(
-            filename, message["log"], task, message.get("encoding", None)
+            filename,
+            message["log"],
+            task,
+            message.get("encoding", None),
+            append=message.get("append", True),
         )
 
 
